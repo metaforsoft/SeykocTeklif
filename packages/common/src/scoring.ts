@@ -148,6 +148,7 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
       stock_id: c.stock_id,
       stock_code: c.stock_code,
       stock_name: c.stock_name,
+      birim: c.birim ?? null,
       score: Number(score.toFixed(3)),
       why
     };

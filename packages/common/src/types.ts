@@ -7,6 +7,7 @@ export interface StockMasterRow {
   stock_name2: string | null;
   description: string | null;
   category1: string | null;
+  birim?: string | null;
   erp_en?: number | null;
   erp_boy?: number | null;
   erp_yukseklik?: number | null;
@@ -99,6 +100,7 @@ export interface CandidateRow {
   stock_id: number;
   stock_code: string | null;
   stock_name: string | null;
+  birim?: string | null;
   product_type: string | null;
   series: string | null;
   series_group: string | null;
@@ -114,6 +116,7 @@ export interface ScoredResult {
   stock_id: number;
   stock_code: string | null;
   stock_name: string | null;
+  birim?: string | null;
   score: number;
   why: string[];
 }

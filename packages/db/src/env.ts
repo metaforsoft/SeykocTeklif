@@ -37,6 +37,7 @@ export const env = {
       stockName2: optional("ERP_COL_STOCK_NAME2", "stock_name2"),
       description: optional("ERP_COL_DESCRIPTION", "description"),
       category1: optional("ERP_COL_CATEGORY1", "category1"),
+      birim: optional("ERP_COL_BIRIM", "Birim"),
       en: optional("ERP_COL_EN", "En"),
       boy: optional("ERP_COL_BOY", "Boy"),
       yukseklik: optional("ERP_COL_YUKSEKLIK", "Yükseklik"),

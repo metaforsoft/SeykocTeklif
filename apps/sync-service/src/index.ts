@@ -10,6 +10,7 @@ interface ErpRawRow {
   stock_name2: string | null;
   description: string | null;
   category1: string | null;
+  birim: string | null;
   erp_en: number | null;
   erp_boy: number | null;
   erp_yukseklik: number | null;
@@ -31,6 +32,7 @@ function selectClause(): string {
     colOrNull(c.stockName2, "stock_name2"),
     colOrNull(c.description, "description"),
     colOrNull(c.category1, "category1"),
+    colOrNull(c.birim, "birim"),
     numOrNull(c.en, "erp_en"),
     numOrNull(c.boy, "erp_boy"),
     numOrNull(c.yukseklik, "erp_yukseklik"),
@@ -90,17 +92,35 @@ async function upsertStockMaster(rows: StockMasterRow[]): Promise<void> {
     await client.query("BEGIN");
     for (const r of rows) {
       await client.query(
-        `INSERT INTO stock_master(stock_id, stock_code, stock_name, stock_name2, description, category1, updated_at, is_active)
-         VALUES($1,$2,$3,$4,$5,$6,$7,TRUE)
+        `INSERT INTO stock_master(stock_id, stock_code, stock_name, stock_name2, description, category1, birim, erp_en, erp_boy, erp_yukseklik, erp_cap, updated_at, is_active)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,TRUE)
          ON CONFLICT(stock_id) DO UPDATE SET
            stock_code=EXCLUDED.stock_code,
            stock_name=EXCLUDED.stock_name,
            stock_name2=EXCLUDED.stock_name2,
            description=EXCLUDED.description,
            category1=EXCLUDED.category1,
+           birim=EXCLUDED.birim,
+           erp_en=EXCLUDED.erp_en,
+           erp_boy=EXCLUDED.erp_boy,
+           erp_yukseklik=EXCLUDED.erp_yukseklik,
+           erp_cap=EXCLUDED.erp_cap,
            updated_at=EXCLUDED.updated_at,
-           is_active=TRUE`,
-        [r.stock_id, r.stock_code, r.stock_name, r.stock_name2, r.description, r.category1, r.updated_at]
+            is_active=TRUE`,
+        [
+          r.stock_id,
+          r.stock_code,
+          r.stock_name,
+          r.stock_name2,
+          r.description,
+          r.category1,
+          r.birim ?? null,
+          r.erp_en ?? null,
+          r.erp_boy ?? null,
+          r.erp_yukseklik ?? null,
+          r.erp_cap ?? null,
+          r.updated_at
+        ]
       );
     }
     await client.query("COMMIT");
@@ -167,6 +187,7 @@ async function runSync(): Promise<void> {
     stock_name2: r.stock_name2,
     description: r.description,
     category1: r.category1,
+    birim: r.birim,
     erp_en: r.erp_en,
     erp_boy: r.erp_boy,
     erp_yukseklik: r.erp_yukseklik,

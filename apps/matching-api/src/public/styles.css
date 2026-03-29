@@ -11,6 +11,7 @@
 }
 
 * { box-sizing: border-box; }
+html, body { overflow-x: hidden; }
 
 body {
   margin: 0;
@@ -53,6 +54,7 @@ body {
   border-radius: 10px;
   padding: 14px;
   box-shadow: 0 2px 8px rgba(16, 24, 40, 0.06);
+  min-width: 0;
 }
 
 h2 { margin: 0 0 10px; font-size: 1rem; color: #2c3e50; }
@@ -249,7 +251,10 @@ textarea:focus, input:focus, select:focus {
 }
 
 .table-wrap {
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
 }
@@ -257,22 +262,34 @@ textarea:focus, input:focus, select:focus {
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 980px;
+  min-width: 1420px;
 }
 
-thead th {
+#resultTable {
+  font-size: 0.76rem;
+  min-width: 1600px;
+}
+
+#resultTable th,
+#resultTable td {
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+#resultTable thead th {
   position: sticky;
   top: 0;
   background: #f0f4f8;
   color: #334e68;
-  font-size: 0.83rem;
+  font-size: 0.68rem;
   text-transform: uppercase;
   letter-spacing: 0.02em;
   border-bottom: 1px solid var(--border);
 }
 
-th, td {
-  padding: 9px 10px;
+#resultTable th,
+#resultTable td {
+  padding: 7px 8px;
   border-bottom: 1px solid #e6edf5;
   vertical-align: top;
 }
@@ -281,7 +298,14 @@ tbody tr:nth-child(even) { background: #fbfdff; }
 .small { font-size: 0.75rem; color: var(--muted); }
 .score { font-weight: 700; color: var(--ok); }
 
-.stock-cell { min-width: 560px; }
+.stock-code-cell { min-width: 250px; }
+.stock-name-cell { min-width: 320px; }
+
+.pick-cell {
+  width: 92px;
+  min-width: 92px;
+  text-align: center;
+}
 
 .stock-picker {
   display: grid;
@@ -291,12 +315,49 @@ tbody tr:nth-child(even) { background: #fbfdff; }
 }
 
 .mini-btn {
-  padding: 9px 0;
+  width: 100%;
+  padding: 6px 0;
   min-width: 0;
 }
 
 .qty-input {
   text-align: center;
+}
+
+#resultTable .dim-input,
+#resultTable .cut-select,
+#resultTable .qty-input,
+#resultTable .stock-select {
+  font-size: 0.72rem;
+  padding: 5px 6px;
+}
+
+#resultTable th:nth-child(2),
+#resultTable td:nth-child(2),
+#resultTable th:nth-child(3),
+#resultTable td:nth-child(3),
+#resultTable th:nth-child(4),
+#resultTable td:nth-child(4) {
+  width: 92px;
+  min-width: 92px;
+}
+
+#resultTable th:nth-child(5),
+#resultTable td:nth-child(5) {
+  width: 250px;
+  min-width: 250px;
+}
+
+#resultTable th:nth-child(10),
+#resultTable td:nth-child(10) {
+  width: 110px;
+  min-width: 110px;
+}
+
+#resultTable .dim-input,
+#resultTable .qty-input {
+  max-width: 92px;
+  margin: 0 auto;
 }
 
 .modal {

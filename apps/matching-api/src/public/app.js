@@ -307,7 +307,7 @@ async function extractDocumentPayload(options = {}) {
 }
 
 function optionLabel(candidate) {
-  return `${candidate.stock_code || "-"} - ${candidate.stock_name || "-"}`;
+  return `${candidate.stock_code || "-"}`;
 }
 
 function selectedCandidate(row) {
@@ -327,6 +327,17 @@ function toDecimalOrNull(value) {
   if (!raw) return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
+}
+
+function displayDim(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  const n = Number(value);
+  return Number.isInteger(n) ? String(n) : String(value).replace(".", ",");
+}
+
+function dimensionInput(value) {
+  if (value === null || value === undefined) return "";
+  return decimalInput(value);
 }
 
 function parseDimParts(dimText) {
@@ -440,7 +451,7 @@ function renderOfferLines() {
             <button type="button" class="btn-secondary mini-btn" data-k="offer-open-stock-modal" data-i="${index}">...</button>
           </div>
         </td>
-        <td>${selected?.stock_name ?? "-"}</td>
+        <td class="stock-name-cell">${selected?.stock_name ?? "-"}</td>
         <td><input data-k="offer-boy" data-i="${index}" value="${row.offer_boy ?? ""}" /></td>
         <td><input data-k="offer-kalinlik" data-i="${index}" value="${row.offer_kalinlikCap ?? ""}" /></td>
         <td><input data-k="offer-enet" data-i="${index}" value="${row.offer_enEtKal ?? ""}" /></td>
@@ -466,6 +477,7 @@ function stockSearchText(stock) {
     stock.stock_code,
     stock.stock_name,
     stock.stock_name2,
+    stock.birim,
     stock.description,
     stock.category1,
     stock.product_type,
@@ -479,15 +491,27 @@ function renderAllStocksTable() {
   if (!allStockTableBodyEl) return;
 
   if (filteredStocks.length === 0) {
-    allStockTableBodyEl.innerHTML = '<tr><td colspan="9" class="muted center">Sonuc yok.</td></tr>';
+    allStockTableBodyEl.innerHTML = '<tr><td colspan="13" class="muted center">Sonuc yok.</td></tr>';
     return;
   }
+
+  const formatErpNumber = (value) => {
+    if (value === null || value === undefined || value === "") return "-";
+    const n = Number(value);
+    if (!Number.isFinite(n)) return String(value);
+    return Number.isInteger(n) ? String(n) : String(n).replace(".", ",");
+  };
 
   allStockTableBodyEl.innerHTML = filteredStocks.slice(0, 600).map((stock) => `
     <tr class="${Number(stock.stock_id) === Number(modalSelectedStockId) ? "selected-row" : ""}" data-k="stock-row" data-stock-id="${stock.stock_id}">
       <td>${stock.stock_code ?? "-"}</td>
       <td>${stock.stock_name ?? "-"}</td>
       <td>${stock.stock_name2 ?? "-"}</td>
+      <td>${stock.birim ?? "-"}</td>
+      <td>${formatErpNumber(stock.erp_en)}</td>
+      <td>${formatErpNumber(stock.erp_boy)}</td>
+      <td>${formatErpNumber(stock.erp_yukseklik)}</td>
+      <td>${formatErpNumber(stock.erp_cap)}</td>
       <td>${stock.series ?? "-"}</td>
       <td>${stock.temper ?? "-"}</td>
       <td>${stock.dim_text ?? "-"}</td>
@@ -551,6 +575,40 @@ function bindCandidateControls() {
 }
 
 function bindRowInputs() {
+  resultBodyEl.querySelectorAll("[data-k='dim-kalinlik']").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const index = Number(e.target.dataset.i);
+      e.target.value = decimalInput(e.target.value || "");
+      rows[index].dimKalinlik = toDecimalOrNull(e.target.value);
+      rows[index].offer_kalinlikCap = rows[index].dimKalinlik;
+    });
+  });
+
+  resultBodyEl.querySelectorAll("[data-k='dim-en']").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const index = Number(e.target.dataset.i);
+      e.target.value = decimalInput(e.target.value || "");
+      rows[index].dimEn = toDecimalOrNull(e.target.value);
+      rows[index].offer_enEtKal = rows[index].dimEn;
+    });
+  });
+
+  resultBodyEl.querySelectorAll("[data-k='dim-boy']").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const index = Number(e.target.dataset.i);
+      e.target.value = decimalInput(e.target.value || "");
+      rows[index].dimBoy = toDecimalOrNull(e.target.value);
+      rows[index].offer_boy = rows[index].dimBoy;
+    });
+  });
+
+  resultBodyEl.querySelectorAll("[data-k='kesim']").forEach((select) => {
+    select.addEventListener("change", (e) => {
+      const index = Number(e.target.dataset.i);
+      rows[index].kesimDurumu = e.target.value || "Kesim Var";
+    });
+  });
+
   resultBodyEl.querySelectorAll("[data-k='qty']").forEach((input) => {
     input.addEventListener("input", (e) => {
       const index = Number(e.target.dataset.i);
@@ -563,27 +621,49 @@ function bindRowInputs() {
 
 function renderTable() {
   if (rows.length === 0) {
-    resultBodyEl.innerHTML = '<tr><td colspan="5" class="muted center">Sonuc yok.</td></tr>';
+    resultBodyEl.innerHTML = '<tr><td colspan="11" class="muted center">Sonuc yok.</td></tr>';
     renderOfferLines();
     return;
   }
 
   resultBodyEl.innerHTML = rows.map((row, index) => {
+    const selected = selectedCandidate(row);
+    const [defaultKalinlik, defaultEn, defaultBoy] = parseDimParts(row.dim_text);
+    const kalinlik = row.dimKalinlik ?? defaultKalinlik;
+    const en = row.dimEn ?? defaultEn;
+    const boy = row.dimBoy ?? defaultBoy;
+    const kesim = row.kesimDurumu || "Kesim Var";
     return `
       <tr>
         <td>${index + 1}</td>
-        <td><div>${row.dim_text || "-"}</div></td>
-        <td class="stock-cell">
-          <div class="stock-picker">
-            <select data-k="candidate-select" data-i="${index}">
-              ${row.candidates.slice(0, candidateCount()).map((candidate) => `
-                <option value="${candidate.stock_id}" ${Number(candidate.stock_id) === Number(row.selected_stock_id) ? "selected" : ""}>
-                  ${optionLabel(candidate)}
-                </option>
-              `).join("")}
-            </select>
-            <button type="button" class="btn-secondary mini-btn" data-k="open-stock-modal" data-i="${index}">...</button>
-          </div>
+        <td>
+          <input data-k="dim-kalinlik" data-i="${index}" class="dim-input" value="${dimensionInput(kalinlik)}" />
+        </td>
+        <td>
+          <input data-k="dim-en" data-i="${index}" class="dim-input" value="${dimensionInput(en)}" />
+        </td>
+        <td>
+          <input data-k="dim-boy" data-i="${index}" class="dim-input" value="${dimensionInput(boy)}" />
+        </td>
+        <td class="stock-code-cell">
+          <select data-k="candidate-select" data-i="${index}">
+            ${row.candidates.slice(0, candidateCount()).map((candidate) => `
+              <option value="${candidate.stock_id}" ${Number(candidate.stock_id) === Number(row.selected_stock_id) ? "selected" : ""}>
+                ${optionLabel(candidate)}
+              </option>
+            `).join("")}
+          </select>
+        </td>
+        <td>${selected?.stock_name ?? "-"}</td>
+        <td class="pick-cell">
+          <button type="button" class="btn-secondary mini-btn" data-k="open-stock-modal" data-i="${index}">...</button>
+        </td>
+        <td>${selected?.birim ?? "-"}</td>
+        <td>
+          <select data-k="kesim" data-i="${index}" class="cut-select">
+            <option value="Kesim Var" ${kesim === "Kesim Var" ? "selected" : ""}>Kesim Var</option>
+            <option value="Kesim Yok" ${kesim === "Kesim Yok" ? "selected" : ""}>Kesim Yok</option>
+          </select>
         </td>
         <td>
           <input
@@ -593,7 +673,7 @@ function renderTable() {
             inputmode="numeric"
             pattern="[0-9]*"
             value="${numericInput(row.quantity)}"
-            placeholder="Miktar"
+            placeholder="Adet"
           />
         </td>
         <td class="score">${row.selected_score ?? "-"}</td>
@@ -631,12 +711,17 @@ async function runAnalysis(doc, options = {}) {
       filters
     });
     const candidates = res.results || [];
+    const [defaultKalinlik, defaultEn, defaultBoy] = parseDimParts(item.dim_text);
     rows.push({
       matchHistoryId: Number(res.matchHistoryId),
       candidates,
       selected_stock_id: candidates[0]?.stock_id ?? null,
       selected_score: candidates[0]?.score ?? null,
       dim_text: item.dim_text,
+      dimKalinlik: defaultKalinlik,
+      dimEn: defaultEn,
+      dimBoy: defaultBoy,
+      kesimDurumu: "Kesim Var",
       quantity: item.qty,
       series: item.series,
       header_context: item.header_context,
@@ -809,6 +894,7 @@ function applyModalSelection() {
       stock_id: stock.stock_id,
       stock_code: stock.stock_code,
       stock_name: stock.stock_name,
+      birim: stock.birim ?? null,
       score: rows[modalRowIndex].selected_score ?? 0
     });
   }

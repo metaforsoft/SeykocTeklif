@@ -1,0 +1,2 @@
+ALTER TABLE stock_master
+ADD COLUMN IF NOT EXISTS birim TEXT;

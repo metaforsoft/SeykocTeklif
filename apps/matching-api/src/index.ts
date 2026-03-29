@@ -239,6 +239,11 @@ app.get("/stocks", async () => {
     stock_name2: string | null;
     description: string | null;
     category1: string | null;
+    birim: string | null;
+    erp_en: number | null;
+    erp_boy: number | null;
+    erp_yukseklik: number | null;
+    erp_cap: number | null;
     product_type: string | null;
     series: string | null;
     temper: string | null;
@@ -251,6 +256,11 @@ app.get("/stocks", async () => {
        sm.stock_name2,
        sm.description,
        sm.category1,
+       sm.birim,
+       sm.erp_en,
+       sm.erp_boy,
+       sm.erp_yukseklik,
+       sm.erp_cap,
        sf.product_type,
        sf.series,
        sf.temper,
@@ -270,6 +280,11 @@ app.get("/stocks", async () => {
       stock_name2: row.stock_name2,
       description: row.description,
       category1: row.category1,
+      birim: row.birim,
+      erp_en: row.erp_en,
+      erp_boy: row.erp_boy,
+      erp_yukseklik: row.erp_yukseklik,
+      erp_cap: row.erp_cap,
       product_type: row.product_type,
       series: row.series,
       temper: row.temper,
@@ -411,6 +426,7 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
       sm.stock_id,
       sm.stock_code,
       sm.stock_name,
+      sm.birim,
       sf.product_type,
       sf.series,
       sf.series_group,

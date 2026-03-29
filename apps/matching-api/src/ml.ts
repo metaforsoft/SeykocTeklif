@@ -129,6 +129,7 @@ export async function retrainModelFromHistory(limit = 3000): Promise<TrainedMode
         stock_id: r.stock_id,
         stock_code: r.stock_code ?? null,
         stock_name: r.stock_name ?? null,
+        birim: r.birim ?? null,
         score: r.score,
         why: r.why as string[]
       }));
