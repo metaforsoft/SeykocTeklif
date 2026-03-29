@@ -1,0 +1,86 @@
+services:
+  matching_db:
+    image: postgres:16
+    container_name: matching_db
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: ${MATCH_PG_DB}
+      POSTGRES_USER: ${MATCH_PG_USER}
+      POSTGRES_PASSWORD: ${MATCH_PG_PASSWORD}
+    volumes:
+      - matching_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MATCH_PG_USER} -d ${MATCH_PG_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ocr-service:
+    build:
+      context: .
+      dockerfile: services/ocr-service/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/matching-api/Dockerfile
+    depends_on:
+      matching_db:
+        condition: service_healthy
+    env_file:
+      - .env
+    command: ["npm", "run", "migrate"]
+    restart: "no"
+
+  sync-service:
+    build:
+      context: .
+      dockerfile: apps/sync-service/Dockerfile
+    depends_on:
+      matching_db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  order-dispatcher:
+    build:
+      context: .
+      dockerfile: apps/order-dispatcher/Dockerfile
+    depends_on:
+      matching_db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  matching-api:
+    build:
+      context: .
+      dockerfile: apps/matching-api/Dockerfile
+    depends_on:
+      matching_db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ocr-service:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      OCR_SERVICE_URL: ${OCR_SERVICE_URL:-http://ocr-service:8090/ocr}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    restart: unless-stopped
+
+volumes:
+  matching_db_data:

@@ -1,0 +1,18 @@
+{
+  "name": "stock-matching-platform",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run -w @smp/common build && npm run -w @smp/db build && npm run -w @smp/sync-service build && npm run -w @smp/order-dispatcher build && npm run -w @smp/matching-api build",
+    "dev": "npm run -ws dev",
+    "start": "npm run -ws start",
+    "migrate": "npm run -w @smp/db migrate",
+    "debug:api": "set MATCH_PG_HOST=localhost&& set MATCH_PG_PORT=5433&& set API_PORT=8081&& npm run -w @smp/matching-api debug",
+    "debug:sync": "set MATCH_PG_HOST=localhost&& set MATCH_PG_PORT=5433&& npm run -w @smp/sync-service debug",
+    "debug:dispatch": "set MATCH_PG_HOST=localhost&& set MATCH_PG_PORT=5433&& npm run -w @smp/order-dispatcher debug"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@smp/matching-api",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').cpSync('src/public','dist/public',{recursive:true})\"",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "debug": "node --inspect=9229 -r ts-node/register src/index.ts"
+  },
+  "dependencies": {
+    "@fastify/static": "^7.0.4",
+    "@smp/common": "1.0.0",
+    "@smp/db": "1.0.0",
+    "@google-cloud/vision": "^4.3.2",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.28.1",
+    "mammoth": "^1.8.0",
+    "pdf-parse": "^1.1.1",
+    "pg": "^8.11.5",
+    "tesseract.js": "^5.1.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@types/pdf-parse": "^1.1.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}

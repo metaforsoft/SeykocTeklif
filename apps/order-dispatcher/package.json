@@ -1,0 +1,21 @@
+{
+  "name": "@smp/order-dispatcher",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "debug": "node --inspect=9231 -r ts-node/register src/index.ts"
+  },
+  "dependencies": {
+    "@smp/db": "1.0.0",
+    "dotenv": "^16.4.5",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}

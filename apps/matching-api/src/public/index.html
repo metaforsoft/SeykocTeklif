@@ -1,0 +1,148 @@
+﻿<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stok Eslestirme Konsolu</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+<body>
+  <main class="layout">
+    <section class="topbar">
+      <div>
+        <h1>Stok Eslestirme Konsolu</h1>
+      </div>
+    </section>
+
+    <section class="panel input-panel">
+      <h2>Girdi Kaynagi</h2>
+      <div class="source-mode">
+        <label><input type="radio" name="sourceMode" value="text" checked /> Metin</label>
+        <label><input type="radio" name="sourceMode" value="doc" /> Dokuman</label>
+      </div>
+
+      <div id="sourceLayout" class="source-layout">
+        <div id="sourceLeftHost">
+          <div id="textWrap">
+            <textarea id="orderText" placeholder="Satir satir siparis metni girin..."></textarea>
+          </div>
+          <div id="docWrap" class="hidden">
+            <label id="dropzone" class="dropzone" for="fileInput">
+              <span class="dropzone-title">Dosyayi buraya birak</span>
+              <span class="dropzone-subtitle">veya secmek icin tikla</span>
+              <span id="fileStatus" class="dropzone-status">Henuz dosya secilmedi.</span>
+              <input id="fileInput" type="file" accept=".txt,.csv,.md,.json,.log,.xml,.html,.htm,.rtf,.pdf,.doc,.docx,.xls,.xlsx,image/*" />
+            </label>
+          </div>
+        </div>
+        <aside class="action-side">
+          <div id="inputActionsRow" class="row actions input-actions">
+            <input id="topK" type="number" min="1" max="20" value="5" />
+            <button id="analyzeBtn" class="btn-primary">Analiz Et ve Eslestir</button>
+            <button id="strongAnalyzeBtn" class="btn-primary" type="button">AI Analiz</button>
+            <button id="teachBtn" class="btn-secondary" type="button">Bu Formati Ogret</button>
+          </div>
+        </aside>
+      </div>
+
+      <div id="advancedPanel" class="hidden" aria-hidden="true">
+        <input id="instructionText" type="hidden" value="" />
+        <input id="matchInstructionText" type="hidden" value="" />
+        <input id="profileName" type="hidden" value="" />
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Eslestirilen Satirlar</h2>
+      <div class="table-wrap">
+        <table id="resultTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Ayristirilan</th>
+              <th>Onerilen Stok</th>
+              <th>Miktar</th>
+              <th>Skor</th>
+            </tr>
+          </thead>
+          <tbody id="resultBody">
+            <tr><td colspan="5" class="muted center">Henuz analiz yapilmadi.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="row actions">
+        <button id="saveBtn" class="btn-primary">Secimleri Kaydet</button>
+      </div>
+      <pre id="saveStatus" class="code-box">Beklemede.</pre>
+    </section>
+  </main>
+
+  <div id="stockModal" class="modal hidden">
+    <div class="modal-backdrop" data-k="close-modal"></div>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Tum Stoklar</h3>
+        <button id="closeStockModalBtn" type="button" class="icon-btn">Kapat</button>
+      </div>
+      <div class="modal-body">
+        <input id="allStockSearch" type="text" placeholder="Stok kodu, adi, seri, temper, olcu ara..." />
+        <div class="modal-table-wrap">
+          <table class="modal-table">
+            <thead>
+              <tr>
+                <th>Kod</th>
+                <th>Ad</th>
+                <th>Ad 2</th>
+                <th>Seri</th>
+                <th>Temper</th>
+                <th>Olcu</th>
+                <th>Tip</th>
+                <th>Kategori</th>
+                <th>Aciklama</th>
+              </tr>
+            </thead>
+            <tbody id="allStockTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="selectStockBtn" type="button" class="btn-primary">Sec</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="analysisModal" class="modal modal--loading hidden" aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="loading-card" role="status" aria-live="polite" aria-busy="true">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <h3 id="analysisModalTitle">Analiz ediliyor...</h3>
+      <p id="analysisModalDetail">Islem baslatiliyor...</p>
+    </div>
+  </div>
+
+  <button id="instructionDrawerToggleBtn" type="button" class="drawer-toggle-btn">
+    Talimat Chat
+  </button>
+
+  <div id="instructionDrawerOverlay" class="drawer-overlay" data-k="drawer-close"></div>
+  <aside id="instructionDrawer" class="instruction-drawer" aria-hidden="true">
+    <div class="instruction-drawer-head">
+      <div>
+        <h3>Talimat Asistani</h3>
+        <p>Buraya yazdigin talimata gore eslestirme yenilenir.</p>
+      </div>
+      <button id="instructionDrawerCloseBtn" type="button" class="icon-btn">Kapat</button>
+    </div>
+    <div id="instructionChatBody" class="instruction-chat-body"></div>
+    <form id="instructionChatForm" class="instruction-chat-form">
+      <textarea id="instructionChatInput" placeholder="Ornek: APL ile baslayan stoklari one al, 7075 serisini tercih et."></textarea>
+      <button id="instructionChatSendBtn" type="submit" class="btn-primary">Gonder ve Yenile</button>
+    </form>
+  </aside>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>
