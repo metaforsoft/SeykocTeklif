@@ -328,8 +328,9 @@ tbody tr:nth-child(even) { background: #fbfdff; }
 #resultTable .cut-select,
 #resultTable .qty-input,
 #resultTable .stock-select {
-  font-size: 0.72rem;
-  padding: 5px 6px;
+  font-size: 0.66rem;
+  padding: 3px 5px;
+  height: 32px;
 }
 
 #resultTable th:nth-child(2),
@@ -348,16 +349,51 @@ tbody tr:nth-child(even) { background: #fbfdff; }
   min-width: 250px;
 }
 
-#resultTable th:nth-child(10),
-#resultTable td:nth-child(10) {
-  width: 110px;
-  min-width: 110px;
+#resultTable th:nth-child(11),
+#resultTable td:nth-child(11) {
+  width: 84px;
+  min-width: 84px;
 }
 
 #resultTable .dim-input,
 #resultTable .qty-input {
   max-width: 92px;
   margin: 0 auto;
+}
+
+#resultTable [data-k='candidate-select'] {
+  height: 34px;
+}
+
+#resultTable .cut-select {
+  max-width: 104px;
+}
+
+.row-actions-cell {
+  width: 84px;
+  min-width: 84px;
+}
+
+.row-action-stack {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.row-action-btn {
+  padding: 5px 6px;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.row-action-btn--icon {
+  min-width: 0;
+  font-size: 1rem;
+  line-height: 1;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .modal {
@@ -544,7 +580,7 @@ tbody tr:nth-child(even) { background: #fbfdff; }
 
 .modal-card {
   position: relative;
-  width: min(1240px, 96vw);
+  width: min(1420px, 98vw);
   margin: 4vh auto 0;
   background: #fff;
   border-radius: 12px;
@@ -600,15 +636,20 @@ tbody tr:nth-child(even) { background: #fbfdff; }
   width: 100%;
   font-family: "IBM Plex Mono", monospace;
   border-collapse: collapse;
-  min-width: 1400px;
+  min-width: 1320px;
+  table-layout: fixed;
 }
 
 .modal-table th,
 .modal-table td {
-  padding: 8px 10px;
+  padding: 5px 8px;
   border-bottom: 1px solid #e6edf5;
   text-align: left;
   vertical-align: top;
+  font-size: 0.76rem;
+  line-height: 1.22;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .modal-table thead th {
@@ -616,6 +657,57 @@ tbody tr:nth-child(even) { background: #fbfdff; }
   top: 0;
   background: #f8fafc;
   z-index: 1;
+  font-size: 0.66rem;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+}
+
+.modal-table th:nth-child(1),
+.modal-table td:nth-child(1) {
+  width: 252px;
+  min-width: 252px;
+}
+
+.modal-table th:nth-child(2),
+.modal-table td:nth-child(2) {
+  width: 292px;
+  min-width: 292px;
+}
+
+.modal-table th:nth-child(3),
+.modal-table td:nth-child(3) {
+  width: 58px;
+  min-width: 58px;
+}
+
+.modal-table th:nth-child(4),
+.modal-table td:nth-child(4) {
+  width: 84px;
+  min-width: 84px;
+}
+
+.modal-table th:nth-child(5),
+.modal-table td:nth-child(5),
+.modal-table th:nth-child(6),
+.modal-table td:nth-child(6),
+.modal-table th:nth-child(7),
+.modal-table td:nth-child(7),
+.modal-table th:nth-child(8),
+.modal-table td:nth-child(8),
+.modal-table th:nth-child(9),
+.modal-table td:nth-child(9),
+.modal-table th:nth-child(10),
+.modal-table td:nth-child(10),
+.modal-table th:nth-child(11),
+.modal-table td:nth-child(11),
+.modal-table th:nth-child(12),
+.modal-table td:nth-child(12),
+.modal-table th:nth-child(13),
+.modal-table td:nth-child(13),
+.modal-table th:nth-child(14),
+.modal-table td:nth-child(14) {
+  width: 84px;
+  min-width: 84px;
 }
 
 .selected-row {

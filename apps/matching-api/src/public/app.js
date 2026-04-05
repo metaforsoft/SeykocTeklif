@@ -15,6 +15,7 @@ const matchInstructionTextEl = el("matchInstructionText");
 const profileNameEl = el("profileName");
 const resultBodyEl = el("resultBody");
 const saveStatusEl = el("saveStatus");
+const addRowBtnEl = el("addRowBtn");
 const stockModalEl = el("stockModal");
 const allStockSearchEl = el("allStockSearch");
 const allStockTableBodyEl = el("allStockTableBody");
@@ -54,6 +55,43 @@ let offerDraftId = null;
 let instructionDrawerOpen = false;
 let pendingChatLearning = null;
 
+const SOURCE_TYPE_LABELS = {
+  text: "Metin",
+  doc: "Doküman",
+  image: "Görsel",
+  file: "Dosya"
+};
+
+const EXTRACTION_METHOD_LABELS = {
+  llm_image_fallback: "Yapay zeka görsel çözümleme",
+  llm_text_fallback: "Yapay zeka metin çözümleme",
+  ocr_parser: "OCR + ayrıştırıcı",
+  ocr: "OCR",
+  parser: "Ayrıştırıcı",
+  text: "Metin çözümleme",
+  file: "Dosya çözümleme"
+};
+
+function formatUiLabel(value, fallback = "-") {
+  const raw = String(value ?? "").trim();
+  if (!raw) return fallback;
+  return raw
+    .split(/[_-]+/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toLocaleUpperCase("tr-TR") + part.slice(1))
+    .join(" ");
+}
+
+function formatSourceType(value) {
+  const key = String(value ?? "").trim().toLocaleLowerCase("tr-TR");
+  return SOURCE_TYPE_LABELS[key] || formatUiLabel(key);
+}
+
+function formatExtractionMethod(value) {
+  const key = String(value ?? "").trim().toLocaleLowerCase("tr-TR");
+  return EXTRACTION_METHOD_LABELS[key] || formatUiLabel(key);
+}
+
 function currentInstruction() {
   return instructionTextEl?.value?.trim() || "";
 }
@@ -89,7 +127,7 @@ function setAnalysisModal(open, detailText = "") {
     analysisModalTitleEl.textContent = isOpen ? "Analiz ediliyor..." : "";
   }
   if (analysisModalDetailEl) {
-    analysisModalDetailEl.textContent = isOpen ? (detailText || "Islem devam ediyor...") : "";
+    analysisModalDetailEl.textContent = isOpen ? (detailText || "İşlem devam ediyor...") : "";
   }
   setAnalyzeBusy(isOpen);
 }
@@ -169,7 +207,7 @@ async function rerunMatchingByInstruction(message) {
   if (matchInstructionTextEl) {
     matchInstructionTextEl.value = message;
   }
-  appendInstructionMessage("assistant", "Talimat alindi. Analiz ve eslestirme birlikte yenileniyor...");
+  appendInstructionMessage("assistant", "Talimat alındı. Analiz ve eşleştirme birlikte yenileniyor...");
 
   try {
     setAnalysisModal(true, "Talimata gore analiz ve eslestirme yenileniyor...");
@@ -184,11 +222,11 @@ async function rerunMatchingByInstruction(message) {
     } else if (extractedDoc) {
       doc = extractedDoc;
     } else {
-      throw new Error("Once metin veya dokuman girin.");
+      throw new Error("Önce metin veya doküman girin.");
     }
     await runAnalysis(doc, {
       onProgress: ({ current, total }) => {
-        setAnalysisModal(true, `${current}/${total} satir talimata gore analiz/eslestirme yapiliyor...`);
+        setAnalysisModal(true, `${current}/${total} satır talimata göre analiz/eşleştirme yapılıyor...`);
       }
     });
     pendingChatLearning = {
@@ -197,9 +235,9 @@ async function rerunMatchingByInstruction(message) {
       sourceMode,
       profileId: extractedDoc?.learning?.applied_profile_id ?? null
     };
-    appendInstructionMessage("assistant", `Tamamlandi. ${rows.length} satir talimata gore yenilendi. Bu talimat, Secimleri Kaydet sonrasi ogrenecek.`);
+    appendInstructionMessage("assistant", `Tamamlandı. ${rows.length} satır talimata göre yenilendi. Bu talimat, Seçimleri Kaydet sonrası öğrenilecek.`);
   } catch (err) {
-    appendInstructionMessage("assistant", `Islem basarisiz: ${err.message}`);
+    appendInstructionMessage("assistant", `İşlem başarısız: ${err.message}`);
   } finally {
     setAnalysisModal(false);
   }
@@ -216,7 +254,7 @@ function setMode(mode) {
     textWrap.classList.remove("hidden");
     docWrap.classList.add("hidden");
     fileInputEl.value = "";
-    setFileStatus("Henuz dosya secilmedi.");
+    setFileStatus("Henüz dosya seçilmedi.");
   } else {
     textWrap.classList.add("hidden");
     docWrap.classList.remove("hidden");
@@ -295,7 +333,7 @@ async function extractDocumentPayload(options = {}) {
   }
 
   const file = fileInputEl.files?.[0];
-  if (!file) throw new Error("Dokuman secin.");
+  if (!file) throw new Error("Doküman seçin.");
   const contentBase64 = await fileToBase64(file);
   return await api("/extract-source", "POST", {
     fileName: file.name,
@@ -311,7 +349,44 @@ function optionLabel(candidate) {
 }
 
 function selectedCandidate(row) {
-  return row.candidates.find((candidate) => Number(candidate.stock_id) === Number(row.selected_stock_id)) || null;
+  const candidates = Array.isArray(row?.candidates) ? row.candidates : [];
+  return candidates.find((candidate) => Number(candidate.stock_id) === Number(row.selected_stock_id)) || null;
+}
+
+function createEmptyRow(overrides = {}) {
+  return {
+    matchHistoryId: null,
+    candidates: [],
+    selected_stock_id: null,
+    selected_score: null,
+    dim_text: "",
+    dimKalinlik: null,
+    dimEn: null,
+    dimBoy: null,
+    kesimDurumu: "Kesim Var",
+    quantity: 1,
+    series: null,
+    header_context: null,
+    user_note: "manuel_satir",
+    isManual: true,
+    ...overrides
+  };
+}
+
+function addManualRow(afterIndex = null) {
+  const newRow = createEmptyRow();
+  if (Number.isInteger(afterIndex) && afterIndex >= 0 && afterIndex < rows.length) {
+    rows.splice(afterIndex + 1, 0, newRow);
+  } else {
+    rows.push(newRow);
+  }
+  renderTable();
+}
+
+function removeRow(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= rows.length) return;
+  rows.splice(index, 1);
+  renderTable();
 }
 
 function numericInput(value) {
@@ -432,7 +507,7 @@ function renderOfferLines() {
   if (!offerLineBodyEl) return;
 
   if (rows.length === 0) {
-    offerLineBodyEl.innerHTML = '<tr><td colspan="11" class="muted center">Teklif satiri henuz yok.</td></tr>';
+    offerLineBodyEl.innerHTML = '<tr><td colspan="11" class="muted center">Henüz teklif satırı yok.</td></tr>';
     return;
   }
 
@@ -491,7 +566,7 @@ function renderAllStocksTable() {
   if (!allStockTableBodyEl) return;
 
   if (filteredStocks.length === 0) {
-    allStockTableBodyEl.innerHTML = '<tr><td colspan="13" class="muted center">Sonuc yok.</td></tr>';
+    allStockTableBodyEl.innerHTML = '<tr><td colspan="13" class="muted center">Sonuç yok.</td></tr>';
     return;
   }
 
@@ -556,8 +631,13 @@ function bindCandidateControls() {
     select.addEventListener("change", (e) => {
       const index = Number(e.target.dataset.i);
       const stockId = Number(e.target.value);
-      const hit = rows[index].candidates.find((candidate) => Number(candidate.stock_id) === stockId);
-      if (!hit) return;
+      const hit = (rows[index].candidates || []).find((candidate) => Number(candidate.stock_id) === stockId);
+      if (!hit) {
+        rows[index].selected_stock_id = null;
+        rows[index].selected_score = null;
+        renderTable();
+        return;
+      }
       rows[index].selected_stock_id = hit.stock_id;
       rows[index].selected_score = hit.score;
       if (!rows[index].offer_manuelStockAdi) {
@@ -570,6 +650,18 @@ function bindCandidateControls() {
   resultBodyEl.querySelectorAll("[data-k='open-stock-modal']").forEach((button) => {
     button.addEventListener("click", async (e) => {
       await openStockModalForRow(Number(e.currentTarget.dataset.i));
+    });
+  });
+
+  resultBodyEl.querySelectorAll("[data-k='add-row']").forEach((button) => {
+    button.addEventListener("click", (e) => {
+      addManualRow(Number(e.currentTarget.dataset.i));
+    });
+  });
+
+  resultBodyEl.querySelectorAll("[data-k='remove-row']").forEach((button) => {
+    button.addEventListener("click", (e) => {
+      removeRow(Number(e.currentTarget.dataset.i));
     });
   });
 }
@@ -621,13 +713,14 @@ function bindRowInputs() {
 
 function renderTable() {
   if (rows.length === 0) {
-    resultBodyEl.innerHTML = '<tr><td colspan="11" class="muted center">Sonuc yok.</td></tr>';
+    resultBodyEl.innerHTML = '<tr><td colspan="11" class="muted center">Sonuç yok.</td></tr>';
     renderOfferLines();
     return;
   }
 
   resultBodyEl.innerHTML = rows.map((row, index) => {
     const selected = selectedCandidate(row);
+    const candidates = Array.isArray(row.candidates) ? row.candidates : [];
     const [defaultKalinlik, defaultEn, defaultBoy] = parseDimParts(row.dim_text);
     const kalinlik = row.dimKalinlik ?? defaultKalinlik;
     const en = row.dimEn ?? defaultEn;
@@ -646,8 +739,9 @@ function renderTable() {
           <input data-k="dim-boy" data-i="${index}" class="dim-input" value="${dimensionInput(boy)}" />
         </td>
         <td class="stock-code-cell">
-          <select data-k="candidate-select" data-i="${index}">
-            ${row.candidates.slice(0, candidateCount()).map((candidate) => `
+          <select data-k="candidate-select" data-i="${index}" ${candidates.length === 0 ? "disabled" : ""}>
+            ${candidates.length === 0 ? '<option value="">Stok seçin</option>' : ""}
+            ${candidates.slice(0, candidateCount()).map((candidate) => `
               <option value="${candidate.stock_id}" ${Number(candidate.stock_id) === Number(row.selected_stock_id) ? "selected" : ""}>
                 ${optionLabel(candidate)}
               </option>
@@ -676,7 +770,12 @@ function renderTable() {
             placeholder="Adet"
           />
         </td>
-        <td class="score">${row.selected_score ?? "-"}</td>
+        <td class="row-actions-cell">
+          <div class="row-action-stack">
+            <button type="button" class="btn-secondary row-action-btn row-action-btn--icon" data-k="add-row" data-i="${index}" title="Altına ekle" aria-label="Altına ekle">+</button>
+            <button type="button" class="btn-secondary row-action-btn row-action-btn--icon" data-k="remove-row" data-i="${index}" title="Satırı kaldır" aria-label="Satırı kaldır">×</button>
+          </div>
+        </td>
       </tr>
     `;
   }).join("");
@@ -687,9 +786,9 @@ function renderTable() {
 }
 
 async function runAnalysis(doc, options = {}) {
-  if (!doc) throw new Error("Kaynak cozumlenemedi.");
+  if (!doc) throw new Error("Kaynak çözümlenemedi.");
   if (!Array.isArray(doc.items) || doc.items.length === 0) {
-    throw new Error("Olcu iceren siparis satiri bulunamadi.");
+    throw new Error("Ölçü içeren sipariş satırı bulunamadı.");
   }
 
   const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
@@ -731,7 +830,7 @@ async function runAnalysis(doc, options = {}) {
 
   renderTable();
   const learnedFrom = doc.learning?.applied_profile_name ? ` | Profil: ${doc.learning.applied_profile_name}` : "";
-  saveStatusEl.textContent = `${rows.length} satir analiz edildi. Kaynak: ${doc.source_type} | Yontem: ${doc.extraction_method || "-"}${learnedFrom}`;
+  saveStatusEl.textContent = `${rows.length} satır analiz edildi. Kaynak: ${formatSourceType(doc.source_type)} | Yöntem: ${formatExtractionMethod(doc.extraction_method)}${learnedFrom}`;
 }
 
 function applyLearnedInstructions(doc) {
@@ -755,7 +854,7 @@ async function handleSelectedFile(file) {
   } catch (err) {
     extractedDoc = null;
     setFileStatus(file.name, true);
-    saveStatusEl.textContent = `Dosya cozumleme hatasi: ${err.message}`;
+    saveStatusEl.textContent = `Dosya çözümleme hatası: ${err.message}`;
   }
 }
 
@@ -786,14 +885,14 @@ dropzoneEl?.addEventListener("drop", async (event) => {
 
 analyzeBtnEl?.addEventListener("click", async () => {
   try {
-    setAnalysisModal(true, "Dokuman okunuyor...");
+    setAnalysisModal(true, "Doküman okunuyor...");
     const doc = await extractDocumentPayload();
     extractedDoc = doc;
     applyLearnedInstructions(doc);
-    setAnalysisModal(true, `${doc.items?.length || 0} satir eslestirme kuyruguna alindi...`);
+    setAnalysisModal(true, `${doc.items?.length || 0} satır eşleştirme kuyruğuna alındı...`);
     await runAnalysis(doc, {
       onProgress: ({ current, total }) => {
-        setAnalysisModal(true, `${current}/${total} satir eslestiriliyor...`);
+        setAnalysisModal(true, `${current}/${total} satır eşleştiriliyor...`);
       }
     });
   } catch (err) {
@@ -805,7 +904,7 @@ analyzeBtnEl?.addEventListener("click", async () => {
 
 strongAnalyzeBtnEl?.addEventListener("click", async () => {
   try {
-    setAnalysisModal(true, "Guclu AI ile dokuman okunuyor...");
+    setAnalysisModal(true, "Güçlü yapay zeka ile doküman okunuyor...");
     const doc = await extractDocumentPayload({ forceAiFallback: true });
     extractedDoc = doc;
     applyLearnedInstructions(doc);
@@ -815,12 +914,12 @@ strongAnalyzeBtnEl?.addEventListener("click", async () => {
     const llmImageError = doc?.debug?.llm_image_error || "";
     const llmTextError = doc?.debug?.llm_text_error || "";
     if (String(llmImageError).includes("OPENAI_API_KEY missing") || String(llmTextError).includes("OPENAI_API_KEY missing")) {
-      saveStatusEl.textContent = "AI Analiz secildi ancak OPENAI_API_KEY tanimli degil. Sistem OCR + parser ile devam etti.";
+      saveStatusEl.textContent = "Yapay zeka analizi seçildi ancak OPENAI_API_KEY tanımlı değil. Sistem OCR + ayrıştırıcı ile devam etti.";
     }
-    setAnalysisModal(true, `${doc.items?.length || 0} satir eslestirme kuyruguna alindi...`);
+    setAnalysisModal(true, `${doc.items?.length || 0} satır eşleştirme kuyruğuna alındı...`);
     await runAnalysis(doc, {
       onProgress: ({ current, total }) => {
-        setAnalysisModal(true, `${current}/${total} satir eslestiriliyor...`);
+        setAnalysisModal(true, `${current}/${total} satır eşleştiriliyor...`);
       }
     });
   } catch (err) {
@@ -835,15 +934,15 @@ teachBtnEl?.addEventListener("click", async () => {
   const profileName = profileNameEl?.value?.trim() || "";
 
   if (!extractedDoc) {
-    alert("Once analiz edilecek metni veya dokumani cozumleyin.");
+    alert("Önce analiz edilecek metni veya dokümanı çözümleyin.");
     return;
   }
   if (!userInstruction) {
-    alert("Once analiz talimati girin.");
+    alert("Önce analiz talimatı girin.");
     return;
   }
   if (!profileName) {
-    alert("Profil adi girin.");
+    alert("Profil adı girin.");
     return;
   }
 
@@ -899,6 +998,7 @@ function applyModalSelection() {
     });
   }
   rows[modalRowIndex].selected_stock_id = stock.stock_id;
+  rows[modalRowIndex].selected_score = existing?.score ?? rows[modalRowIndex].selected_score ?? 0;
   if (!rows[modalRowIndex].offer_manuelStockAdi) {
     rows[modalRowIndex].offer_manuelStockAdi = stock.stock_name || "";
   }
@@ -909,6 +1009,10 @@ function applyModalSelection() {
 selectStockBtnEl?.addEventListener("click", applyModalSelection);
 allStockSearchEl?.addEventListener("input", filterAllStocks);
 
+addRowBtnEl?.addEventListener("click", () => {
+  addManualRow();
+});
+
 el("saveBtn").addEventListener("click", async () => {
   if (rows.length === 0) {
     alert("Once analiz yapin.");
@@ -917,9 +1021,18 @@ el("saveBtn").addEventListener("click", async () => {
 
   const failed = [];
   let success = 0;
-  for (const row of rows) {
+  const feedbackRows = rows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => Number.isFinite(Number(row.matchHistoryId)));
+
+  if (feedbackRows.length === 0) {
+    saveStatusEl.textContent = "Kaydedilecek eşleşme geri bildirimi yok. Manuel satırlar tabloda tutuldu.";
+    return;
+  }
+
+  for (const { row, index } of feedbackRows) {
     if (!row.selected_stock_id) {
-      failed.push(`gecmis ${row.matchHistoryId}: secili stok yok`);
+      failed.push(`satır ${index + 1}: seçili stok yok`);
       continue;
     }
     try {
@@ -930,11 +1043,12 @@ el("saveBtn").addEventListener("click", async () => {
       });
       success += 1;
     } catch (err) {
-      failed.push(`gecmis ${row.matchHistoryId}: ${err.message}`);
+      failed.push(`satır ${index + 1}: ${err.message}`);
     }
   }
 
-  const total = rows.length;
+  const total = feedbackRows.length;
+  const manualCount = rows.length - feedbackRows.length;
   if (success > 0 && extractedDoc) {
     try {
       if (pendingChatLearning?.message) {
@@ -949,10 +1063,10 @@ el("saveBtn").addEventListener("click", async () => {
       });
       if (pendingChatLearning?.message) {
         if (failed.length === 0) {
-          appendInstructionMessage("assistant", `Talimat ogrenildi ve onaylandi${pendingChatLearning.profileId ? ` (#${pendingChatLearning.profileId})` : ""}.`);
+          appendInstructionMessage("assistant", `Talimat öğrenildi ve onaylandı${pendingChatLearning.profileId ? ` (#${pendingChatLearning.profileId})` : ""}.`);
           pendingChatLearning = null;
         } else {
-          appendInstructionMessage("assistant", "Kayit kismi tamamlandi. Talimat ogrenmesi tam onay icin yeniden Secimleri Kaydet bekliyor.");
+          appendInstructionMessage("assistant", "Kayıt kısmı tamamlandı. Talimat öğrenmesi tam onay için yeniden Seçimleri Kaydet bekliyor.");
         }
       }
     } catch {
@@ -961,10 +1075,10 @@ el("saveBtn").addEventListener("click", async () => {
   }
 
   if (failed.length === 0) {
-    saveStatusEl.textContent = `Kayit basarili. ${success}/${total} satir kaydedildi.`;
+    saveStatusEl.textContent = `Kayıt başarılı. ${success}/${total} satır kaydedildi.${manualCount > 0 ? ` Manuel satır: ${manualCount}.` : ""}`;
   } else {
     const failLines = failed.map((item) => `- ${item}`).join("\n");
-    saveStatusEl.textContent = `Kismi kayit tamamlandi. Kaydedilen: ${success}/${total}\nKaydedilemeyenler:\n${failLines}`;
+    saveStatusEl.textContent = `Kısmi kayıt tamamlandı. Kaydedilen: ${success}/${total}${manualCount > 0 ? ` | Manuel satır: ${manualCount}` : ""}\nKaydedilemeyenler:\n${failLines}`;
   }
 });
 
@@ -1065,10 +1179,10 @@ sendOfferBtnEl?.addEventListener("click", async () => {
 });
 
 setInstructionDrawerOpen(false);
-appendInstructionMessage("assistant", "Eslestirme talimatinizi yazin. Gonder dediginizde mevcut satirlar talimata gore yeniden eslestirilir.");
+appendInstructionMessage("assistant", "Eşleştirme talimatınızı yazın. Gönder dediğinizde mevcut satırlar talimata göre yeniden eşleştirilir.");
 const initialMode = document.querySelector('input[name="sourceMode"]:checked')?.value || "text";
 setMode(initialMode);
-setFileStatus("Henuz dosya secilmedi.");
+setFileStatus("Henüz dosya seçilmedi.");
 if (offerBelgeTarihiEl && !offerBelgeTarihiEl.value) {
   offerBelgeTarihiEl.value = new Date().toISOString().slice(0, 10);
 }

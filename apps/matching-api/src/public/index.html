@@ -1,9 +1,9 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="tr">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stok Eslestirme Konsolu</title>
+  <title>Stok Eşleştirme Konsolu</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -13,27 +13,27 @@
   <main class="layout">
     <section class="topbar">
       <div>
-        <h1>Stok Eslestirme Konsolu</h1>
+        <h1>Stok Eşleştirme Konsolu</h1>
       </div>
     </section>
 
     <section class="panel input-panel">
-      <h2>Girdi Kaynagi</h2>
+      <h2>Girdi Kaynağı</h2>
       <div class="source-mode">
         <label><input type="radio" name="sourceMode" value="text" checked /> Metin</label>
-        <label><input type="radio" name="sourceMode" value="doc" /> Dokuman</label>
+        <label><input type="radio" name="sourceMode" value="doc" /> Doküman</label>
       </div>
 
       <div id="sourceLayout" class="source-layout">
         <div id="sourceLeftHost">
           <div id="textWrap">
-            <textarea id="orderText" placeholder="Satir satir siparis metni girin..."></textarea>
+            <textarea id="orderText" placeholder="Satır satır sipariş metni girin..."></textarea>
           </div>
           <div id="docWrap" class="hidden">
             <label id="dropzone" class="dropzone" for="fileInput">
-              <span class="dropzone-title">Dosyayi buraya birak</span>
-              <span class="dropzone-subtitle">veya secmek icin tikla</span>
-              <span id="fileStatus" class="dropzone-status">Henuz dosya secilmedi.</span>
+              <span class="dropzone-title">Dosyayı buraya bırak</span>
+              <span class="dropzone-subtitle">veya seçmek için tıkla</span>
+              <span id="fileStatus" class="dropzone-status">Henüz dosya seçilmedi.</span>
               <input id="fileInput" type="file" accept=".txt,.csv,.md,.json,.log,.xml,.html,.htm,.rtf,.pdf,.doc,.docx,.xls,.xlsx,image/*" />
             </label>
           </div>
@@ -41,9 +41,9 @@
         <aside class="action-side">
           <div id="inputActionsRow" class="row actions input-actions">
             <input id="topK" type="number" min="1" max="20" value="5" />
-            <button id="analyzeBtn" class="btn-primary">Analiz Et ve Eslestir</button>
+            <button id="analyzeBtn" class="btn-primary">Analiz Et ve Eşleştir</button>
             <button id="strongAnalyzeBtn" class="btn-primary" type="button">AI Analiz</button>
-            <button id="teachBtn" class="btn-secondary" type="button">Bu Formati Ogret</button>
+            <button id="teachBtn" class="btn-secondary" type="button">Bu Formatı Öğret</button>
           </div>
         </aside>
       </div>
@@ -56,33 +56,34 @@
     </section>
 
     <section class="panel">
-      <h2>Eslestirilen Satirlar</h2>
+      <h2>Eşleştirilen Satırlar</h2>
       <div class="table-wrap">
         <table id="resultTable">
           <thead>
             <tr>
               <th>#</th>
-              <th>Kalinlik</th>
+              <th>Kalınlık</th>
               <th>En</th>
               <th>Boy</th>
               <th>Stok Kodu</th>
-              <th>Stok Adi</th>
-              <th>Sec</th>
+              <th>Stok Adı</th>
+              <th>Seç</th>
               <th>Birim</th>
               <th>Kesim Var</th>
               <th>Adet</th>
-              <th>Skor</th>
+              <th>İşlem</th>
             </tr>
           </thead>
           <tbody id="resultBody">
-            <tr><td colspan="11" class="muted center">Henuz analiz yapilmadi.</td></tr>
+            <tr><td colspan="11" class="muted center">Henüz analiz yapılmadı.</td></tr>
           </tbody>
         </table>
       </div>
       <div class="row actions">
-        <button id="saveBtn" class="btn-primary">Secimleri Kaydet</button>
+        <button id="addRowBtn" class="btn-secondary" type="button">Yeni Satır Ekle</button>
+        <button id="saveBtn" class="btn-primary">Seçimleri Kaydet</button>
       </div>
-      <pre id="saveStatus" class="code-box">Beklemede.</pre>
+      <pre id="saveStatus" class="code-box">Bekleniyor.</pre>
     </section>
   </main>
 
@@ -90,11 +91,11 @@
     <div class="modal-backdrop" data-k="close-modal"></div>
     <div class="modal-card">
       <div class="modal-head">
-        <h3>Tum Stoklar</h3>
+        <h3>Tüm Stoklar</h3>
         <button id="closeStockModalBtn" type="button" class="icon-btn">Kapat</button>
       </div>
       <div class="modal-body">
-        <input id="allStockSearch" type="text" placeholder="Stok kodu, adi, seri, temper, olcu ara..." />
+        <input id="allStockSearch" type="text" placeholder="Stok kodu, adı, seri, temper, ölçü ara..." />
         <div class="modal-table-wrap">
           <table class="modal-table">
             <thead>
@@ -109,10 +110,10 @@
                 <th>ERP Cap</th>
                 <th>Seri</th>
                 <th>Temper</th>
-                <th>Olcu</th>
+                <th>Ölçü</th>
                 <th>Tip</th>
                 <th>Kategori</th>
-                <th>Aciklama</th>
+                <th>Açıklama</th>
               </tr>
             </thead>
             <tbody id="allStockTableBody"></tbody>
@@ -120,7 +121,7 @@
         </div>
       </div>
       <div class="modal-actions">
-        <button id="selectStockBtn" type="button" class="btn-primary">Sec</button>
+        <button id="selectStockBtn" type="button" class="btn-primary">Seç</button>
       </div>
     </div>
   </div>
@@ -130,27 +131,27 @@
     <div class="loading-card" role="status" aria-live="polite" aria-busy="true">
       <div class="loading-spinner" aria-hidden="true"></div>
       <h3 id="analysisModalTitle">Analiz ediliyor...</h3>
-      <p id="analysisModalDetail">Islem baslatiliyor...</p>
+      <p id="analysisModalDetail">İşlem başlatılıyor...</p>
     </div>
   </div>
 
   <button id="instructionDrawerToggleBtn" type="button" class="drawer-toggle-btn">
-    Talimat Chat
+    Talimat Sohbeti
   </button>
 
   <div id="instructionDrawerOverlay" class="drawer-overlay" data-k="drawer-close"></div>
   <aside id="instructionDrawer" class="instruction-drawer" aria-hidden="true">
     <div class="instruction-drawer-head">
       <div>
-        <h3>Talimat Asistani</h3>
-        <p>Buraya yazdigin talimata gore eslestirme yenilenir.</p>
+        <h3>Talimat Asistanı</h3>
+        <p>Buraya yazdığınız talimata göre eşleştirme yenilenir.</p>
       </div>
       <button id="instructionDrawerCloseBtn" type="button" class="icon-btn">Kapat</button>
     </div>
     <div id="instructionChatBody" class="instruction-chat-body"></div>
     <form id="instructionChatForm" class="instruction-chat-form">
-      <textarea id="instructionChatInput" placeholder="Ornek: APL ile baslayan stoklari one al, 7075 serisini tercih et."></textarea>
-      <button id="instructionChatSendBtn" type="submit" class="btn-primary">Gonder ve Yenile</button>
+      <textarea id="instructionChatInput" placeholder="Örnek: APL ile başlayan stokları öne al, 7075 serisini tercih et."></textarea>
+      <button id="instructionChatSendBtn" type="submit" class="btn-primary">Gönder ve Yenile</button>
     </form>
   </aside>
 
