@@ -54,6 +54,7 @@ let modalSelectedStockId = null;
 let offerDraftId = null;
 let instructionDrawerOpen = false;
 let pendingChatLearning = null;
+let currentMatchedOfferId = null;
 
 const SOURCE_TYPE_LABELS = {
   text: "Metin",
@@ -170,6 +171,17 @@ function buildAutoProfileName(message) {
 
 function currentSampleName() {
   return sourceMode === "doc" ? "dokuman-girdisi" : "metin-girdisi";
+}
+
+function currentSourceName() {
+  const fileName = fileInputEl?.files?.[0]?.name?.trim();
+  if (fileName) return fileName;
+  const textValue = orderTextEl?.value?.trim() || "";
+  if (textValue) {
+    const firstLine = textValue.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "Metin girdisi";
+    return firstLine.slice(0, 80);
+  }
+  return sourceMode === "doc" ? "Dokuman girdisi" : "Metin girdisi";
 }
 
 async function ensureChatProfileSavedForLearning(message, doc) {
@@ -843,6 +855,84 @@ function applyLearnedInstructions(doc) {
   }
 }
 
+function mapRowsForOfferSave() {
+  return rows.map((row) => ({
+    matchHistoryId: row.matchHistoryId ?? null,
+    selected_stock_id: row.selected_stock_id ?? null,
+    selected_score: row.selected_score ?? null,
+    quantity: row.quantity ?? null,
+    dimKalinlik: row.dimKalinlik ?? null,
+    dimEn: row.dimEn ?? null,
+    dimBoy: row.dimBoy ?? null,
+    kesimDurumu: row.kesimDurumu ?? null,
+    user_note: row.user_note ?? null,
+    header_context: row.header_context ?? null,
+    isManual: Boolean(row.isManual)
+  }));
+}
+
+async function saveMatchedOfferRecord() {
+  if (rows.length === 0) return null;
+  const result = await api("/matched-offers/save", "POST", {
+    offerId: currentMatchedOfferId,
+    title: currentSourceName(),
+    sourceName: currentSourceName(),
+    sourceType: extractedDoc?.source_type || (sourceMode === "doc" ? "doc" : "text"),
+    extractionMethod: extractedDoc?.extraction_method || null,
+    profileName: extractedDoc?.learning?.applied_profile_name || null,
+    rows: mapRowsForOfferSave()
+  });
+  currentMatchedOfferId = Number(result.offerId);
+  return currentMatchedOfferId;
+}
+
+async function loadMatchedOffer(recordId) {
+  const data = await api(`/matched-offers/${recordId}`, "GET");
+  const offer = data.offer || {};
+  currentMatchedOfferId = Number(offer.id);
+  rows = (Array.isArray(data.rows) ? data.rows : []).map((row) => {
+    const stockId = Number(row.selected_stock_id) || null;
+    const stockCode = row.stock_code || "-";
+    const stockName = row.stock_name || "-";
+    const birim = row.birim || "-";
+    return {
+      matchHistoryId: row.matchHistoryId ?? null,
+      candidates: stockId ? [{
+        stock_id: stockId,
+        stock_code: stockCode,
+        stock_name: stockName,
+        birim,
+        score: row.selected_score ?? 0
+      }] : [],
+      selected_stock_id: stockId,
+      selected_score: row.selected_score ?? null,
+      dim_text: "",
+      dimKalinlik: row.dimKalinlik ?? null,
+      dimEn: row.dimEn ?? null,
+      dimBoy: row.dimBoy ?? null,
+      kesimDurumu: row.kesimDurumu || "Kesim Var",
+      quantity: row.quantity ?? null,
+      series: null,
+      header_context: null,
+      user_note: row.user_note || "",
+      isManual: Boolean(row.isManual)
+    };
+  });
+  extractedDoc = {
+    source_type: offer.sourceType || "matched_offer",
+    extraction_method: offer.extractionMethod || "kayit_yukleme",
+    parser_confidence: null,
+    items: [],
+    learning: {
+      fingerprint_text: "",
+      fingerprint_json: {},
+      applied_profile_name: offer.profileName || null
+    }
+  };
+  renderTable();
+  saveStatusEl.textContent = `Kayit yuklendi. Teklif #${currentMatchedOfferId} | Kaynak: ${offer.sourceName || offer.title || "-"}`;
+}
+
 async function handleSelectedFile(file) {
   if (!file) return;
   try {
@@ -1026,7 +1116,8 @@ el("saveBtn").addEventListener("click", async () => {
     .filter(({ row }) => Number.isFinite(Number(row.matchHistoryId)));
 
   if (feedbackRows.length === 0) {
-    saveStatusEl.textContent = "Kaydedilecek eşleşme geri bildirimi yok. Manuel satırlar tabloda tutuldu.";
+    const offerId = await saveMatchedOfferRecord();
+    saveStatusEl.textContent = `Kaydedilecek eşleşme geri bildirimi yok. Manuel satırlar teklif olarak kaydedildi.${offerId ? ` Teklif kaydı: #${offerId}.` : ""}`;
     return;
   }
 
@@ -1075,7 +1166,8 @@ el("saveBtn").addEventListener("click", async () => {
   }
 
   if (failed.length === 0) {
-    saveStatusEl.textContent = `Kayıt başarılı. ${success}/${total} satır kaydedildi.${manualCount > 0 ? ` Manuel satır: ${manualCount}.` : ""}`;
+    const offerId = await saveMatchedOfferRecord();
+    saveStatusEl.textContent = `Kayıt başarılı. ${success}/${total} satır kaydedildi.${manualCount > 0 ? ` Manuel satır: ${manualCount}.` : ""}${offerId ? ` Teklif kaydı: #${offerId}.` : ""}`;
   } else {
     const failLines = failed.map((item) => `- ${item}`).join("\n");
     saveStatusEl.textContent = `Kısmi kayıt tamamlandı. Kaydedilen: ${success}/${total}${manualCount > 0 ? ` | Manuel satır: ${manualCount}` : ""}\nKaydedilemeyenler:\n${failLines}`;
@@ -1185,4 +1277,11 @@ setMode(initialMode);
 setFileStatus("Henüz dosya seçilmedi.");
 if (offerBelgeTarihiEl && !offerBelgeTarihiEl.value) {
   offerBelgeTarihiEl.value = new Date().toISOString().slice(0, 10);
+}
+
+const urlRecordId = Number(new URLSearchParams(window.location.search).get("recordId"));
+if (Number.isFinite(urlRecordId) && urlRecordId > 0) {
+  loadMatchedOffer(urlRecordId).catch((err) => {
+    saveStatusEl.textContent = `Kayit yuklenemedi: ${err.message}`;
+  });
 }

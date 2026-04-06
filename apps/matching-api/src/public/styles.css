@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --bg: #f3f5f8;
   --surface: #ffffff;
   --surface-2: #f8fafc;
@@ -57,13 +57,17 @@ body {
   min-width: 0;
 }
 
+.input-panel {
+  padding: 10px 14px 12px;
+}
+
 h2 { margin: 0 0 10px; font-size: 1rem; color: #2c3e50; }
 .muted { color: var(--muted); margin: 0 0 8px; }
 
 .source-mode {
   display: flex;
-  gap: 16px;
-  margin-bottom: 8px;
+  gap: 14px;
+  margin-bottom: 4px;
 }
 
 .source-mode label {
@@ -84,33 +88,36 @@ h2 { margin: 0 0 10px; font-size: 1rem; color: #2c3e50; }
 }
 
 .source-layout {
-  display: flex;
-  gap: 14px;
+  display: grid;
+  grid-template-columns: minmax(320px, 460px) minmax(220px, 260px);
+  gap: 10px 14px;
   align-items: start;
-  margin-top: 8px;
+  justify-content: space-between;
+  margin-top: 2px;
   width: 100%;
 }
 
 #sourceLeftHost {
-  flex: 0 1 52%;
-  max-width: 52%;
-  min-width: 420px;
+  width: 100%;
+  max-width: 460px;
+  min-width: 0;
 }
 
 .action-side {
-  width: 320px;
-  margin-left: auto;
+  width: 100%;
+  max-width: 260px;
+  margin-left: 0;
 }
 
 .dropzone {
-  width: min(520px, 100%);
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
-  padding: 16px 18px;
+  gap: 2px;
+  padding: 10px 12px;
   border: 2px dashed #9fb3c8;
-  border-radius: 10px;
+  border-radius: 8px;
   background: linear-gradient(180deg, #f8fbff, #eef5fc);
   color: #1d3652;
   cursor: pointer;
@@ -130,12 +137,13 @@ h2 { margin: 0 0 10px; font-size: 1rem; color: #2c3e50; }
 
 .dropzone-title {
   font-weight: 700;
+  font-size: 0.88rem;
 }
 
 .dropzone-subtitle,
 .dropzone-status {
   color: var(--muted);
-  font-size: 0.92rem;
+  font-size: 0.78rem;
 }
 
 .dropzone-status.has-file {
@@ -162,7 +170,13 @@ textarea, input, select {
   font-family: "IBM Plex Mono", monospace;
 }
 
-textarea { min-height: 130px; }
+textarea { min-height: 72px; }
+
+#orderText {
+  min-height: 72px;
+  max-height: 88px;
+  padding: 8px 10px;
+}
 
 textarea:focus, input:focus, select:focus {
   outline: 2px solid #b7d4f4;
@@ -177,22 +191,34 @@ textarea:focus, input:focus, select:focus {
 
 .actions { margin-top: 8px; }
 .input-actions {
-  margin-top: 4px;
+  margin-top: 0;
   margin-bottom: 0;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
   align-items: stretch;
 }
 
 .input-actions #topK {
   width: 100%;
   min-width: 0;
+  height: 34px;
+  padding: 5px 10px;
+  grid-column: 1 / -1;
 }
 
 .input-actions .btn-primary,
 .input-actions .btn-secondary {
   width: 100%;
-  white-space: normal;
+  white-space: nowrap;
   text-align: center;
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 0.84rem;
+}
+
+.input-actions #analyzeBtn {
+  grid-column: 1 / -1;
 }
 
 .section-toggle {

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Giriş</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/portal/portal.css" />
+</head>
+<body class="portal-body login-body">
+  <main class="login-shell">
+    <section class="login-card">
+      <div class="login-copy">
+        <span class="eyebrow">Seykoc Teklif Yönetimi</span>
+        <h1>Yönetim Paneli</h1>
+        <p>Devam etmek için kullanıcı bilgilerinizle giriş yapın.</p>
+      </div>
+      <form id="loginForm" class="login-form">
+        <label>
+          <span>Kullanıcı Adı</span>
+          <input id="usernameInput" name="username" autocomplete="username" required />
+        </label>
+        <label>
+          <span>Şifre</span>
+          <input id="passwordInput" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit" class="btn-primary">Giriş Yap</button>
+        <p id="loginError" class="form-error hidden"></p>
+        <div class="login-hint">
+          <strong>Varsayılan admin:</strong> admin / admin
+        </div>
+      </form>
+    </section>
+  </main>
+  <script src="/portal/portal-login.js"></script>
+</body>
+</html>

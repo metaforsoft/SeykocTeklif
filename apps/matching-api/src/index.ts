@@ -7,6 +7,7 @@ import { getModelStatus, retrainModelFromHistory } from "./ml";
 import { rerankResults } from "./rerank";
 import { extractSourceDocument } from "./source-extract";
 import { recordExtractionFeedback, saveExtractionProfile } from "./extraction-learning";
+import { authenticateCredentials, createSession, destroySession, ensureDefaultAdminUser, hashPassword, resolveRequestUser, shouldRedirectToLogin, isPublicPath } from "./auth";
 
 const app = Fastify({ logger: true });
 
@@ -47,6 +48,30 @@ interface OfferSaveBody {
   header: OfferHeaderInput;
   lines: OfferLineInput[];
   customer_ref?: string;
+}
+
+interface MatchedOfferLineInput {
+  matchHistoryId?: number | null;
+  selected_stock_id?: number | null;
+  selected_score?: number | null;
+  quantity?: number | null;
+  dimKalinlik?: number | null;
+  dimEn?: number | null;
+  dimBoy?: number | null;
+  kesimDurumu?: string | null;
+  user_note?: string | null;
+  header_context?: string | null;
+  isManual?: boolean;
+}
+
+interface SaveMatchedOfferBody {
+  offerId?: number | null;
+  title?: string | null;
+  sourceName?: string | null;
+  sourceType?: string | null;
+  extractionMethod?: string | null;
+  profileName?: string | null;
+  rows: MatchedOfferLineInput[];
 }
 
 function normalizeGuidanceText(value: string): string {
@@ -224,12 +249,454 @@ function validateOfferInput(header: OfferHeaderInput | undefined, lines: OfferLi
   return { ok: true };
 }
 
+function toSafeNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferBody): Promise<number> {
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  const client = await matchPool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const normalizedTitle = String(body.title ?? "").trim() || String(body.sourceName ?? "").trim() || `Teklif ${new Date().toISOString()}`;
+    const lineCount = rows.length;
+    let offerId = Number(body.offerId);
+
+    if (!Number.isFinite(offerId) || offerId <= 0) {
+      const insertRes = await client.query<{ id: string }>(
+        `INSERT INTO matched_offers(title, source_name, source_type, extraction_method, profile_name, created_by_user_id, line_count, status)
+         VALUES($1,$2,$3,$4,$5,$6,$7,'saved')
+         RETURNING id::text`,
+        [
+          normalizedTitle,
+          String(body.sourceName ?? "").trim() || null,
+          String(body.sourceType ?? "").trim() || null,
+          String(body.extractionMethod ?? "").trim() || null,
+          String(body.profileName ?? "").trim() || null,
+          currentUserId,
+          lineCount
+        ]
+      );
+      offerId = Number(insertRes.rows[0].id);
+    } else {
+      await client.query(
+        `UPDATE matched_offers
+         SET title=$2,
+             source_name=$3,
+             source_type=$4,
+             extraction_method=$5,
+             profile_name=$6,
+             line_count=$7,
+             updated_at=NOW()
+         WHERE id=$1`,
+        [
+          offerId,
+          normalizedTitle,
+          String(body.sourceName ?? "").trim() || null,
+          String(body.sourceType ?? "").trim() || null,
+          String(body.extractionMethod ?? "").trim() || null,
+          String(body.profileName ?? "").trim() || null,
+          lineCount
+        ]
+      );
+      await client.query("DELETE FROM matched_offer_lines WHERE matched_offer_id = $1", [offerId]);
+    }
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const stockIdRaw = toSafeNumber(row.selected_stock_id);
+      const stockId = stockIdRaw && stockIdRaw > 0 ? stockIdRaw : null;
+      const selectedScoreRaw = toSafeNumber(row.selected_score);
+      const selectedScore = stockId ? selectedScoreRaw : null;
+      let stockCode: string | null = null;
+      let stockName: string | null = null;
+      let birim: string | null = null;
+
+      if (stockId && stockId > 0) {
+        const stockRes = await client.query<{ stock_code: string | null; stock_name: string | null; birim: string | null }>(
+          "SELECT stock_code, stock_name, birim FROM stock_master WHERE stock_id = $1 LIMIT 1",
+          [stockId]
+        );
+        if ((stockRes.rowCount ?? 0) > 0) {
+          stockCode = stockRes.rows[0].stock_code;
+          stockName = stockRes.rows[0].stock_name;
+          birim = stockRes.rows[0].birim;
+        }
+      }
+
+      await client.query(
+        `INSERT INTO matched_offer_lines(
+           matched_offer_id, line_no, match_history_id, selected_stock_id, stock_code, stock_name, birim,
+           quantity, dim_kalinlik, dim_en, dim_boy, kesim_durumu, selected_score, is_manual, source_line_text, line_json
+         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)`,
+        [
+          offerId,
+          index + 1,
+          toSafeNumber(row.matchHistoryId),
+          stockId,
+          stockCode,
+          stockName,
+          birim,
+          toSafeNumber(row.quantity),
+          toSafeNumber(row.dimKalinlik),
+          toSafeNumber(row.dimEn),
+          toSafeNumber(row.dimBoy),
+          String(row.kesimDurumu ?? "").trim() || null,
+          selectedScore,
+          Boolean(row.isManual),
+          String(row.header_context ?? row.user_note ?? "").trim() || null,
+          JSON.stringify(row)
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+    return offerId;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 app.register(fastifyStatic, {
   root: path.join(__dirname, "public"),
   prefix: "/ui/"
 });
 
-app.get("/", async (_request, reply) => reply.redirect("/ui/"));
+app.register(fastifyStatic, {
+  root: path.join(__dirname, "public"),
+  prefix: "/portal/",
+  decorateReply: false
+});
+
+app.addHook("onRequest", async (request, reply) => {
+  if (isPublicPath(request.url)) return;
+
+  const authUser = await resolveRequestUser(request);
+  if (authUser) return;
+
+  if (shouldRedirectToLogin(request)) {
+    return reply.redirect("/login");
+  }
+
+  return reply.code(401).send({ error: "Unauthorized" });
+});
+
+app.get("/", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  return reply.redirect(authUser ? "/app/dashboard" : "/login");
+});
+
+app.get("/login", async (_request, reply) => reply.sendFile("login.html"));
+app.get("/app", async (_request, reply) => reply.redirect("/app/dashboard"));
+app.get("/app/*", async (_request, reply) => reply.sendFile("app-shell.html"));
+
+app.post<{ Body: { username?: string; password?: string } }>("/auth/login", async (request, reply) => {
+  const username = String(request.body?.username ?? "").trim();
+  const password = String(request.body?.password ?? "");
+  if (!username || !password) {
+    return reply.code(400).send({ error: "Kullanici adi ve sifre gerekli" });
+  }
+
+  const user = await authenticateCredentials(username, password);
+  if (!user) {
+    return reply.code(401).send({ error: "Kullanici adi veya sifre hatali" });
+  }
+
+  await createSession(reply, user.id);
+  return {
+    ok: true,
+    user: {
+      id: user.id,
+      username: user.username,
+      fullName: user.fullName,
+      role: user.role
+    }
+  };
+});
+
+app.post("/auth/logout", async (request, reply) => {
+  await destroySession(request, reply);
+  return { ok: true };
+});
+
+app.get("/auth/me", async (request) => {
+  const authUser = await resolveRequestUser(request);
+  return { user: authUser };
+});
+
+app.get("/dashboard/summary", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser) return reply.code(401).send({ error: "Unauthorized" });
+
+  const [usersRes, offersRes, recentRes, sourceRes] = await Promise.all([
+    matchPool.query<{ total: string }>("SELECT COUNT(*)::text AS total FROM app_users WHERE is_active = TRUE"),
+    matchPool.query<{ total: string; today: string }>(
+      `SELECT COUNT(*)::text AS total,
+              COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE)::text AS today
+       FROM matched_offers`
+    ),
+    matchPool.query<{ created_on: string; total: string }>(
+      `SELECT TO_CHAR(created_at::date, 'YYYY-MM-DD') AS created_on, COUNT(*)::text AS total
+       FROM matched_offers
+       WHERE created_at >= NOW() - INTERVAL '7 days'
+       GROUP BY created_at::date
+       ORDER BY created_at::date`
+    ),
+    matchPool.query<{ source_type: string | null; total: string }>(
+      `SELECT COALESCE(source_type, 'bilinmiyor') AS source_type, COUNT(*)::text AS total
+       FROM matched_offers
+       GROUP BY COALESCE(source_type, 'bilinmiyor')
+       ORDER BY COUNT(*) DESC`
+    )
+  ]);
+
+  const totalOffers = Number(offersRes.rows[0]?.total ?? 0);
+  const todayOffers = Number(offersRes.rows[0]?.today ?? 0);
+  const pendingOffers = Math.max(0, totalOffers - todayOffers);
+
+  return {
+    cards: {
+      totalOffers,
+      todayOffers,
+      pendingOffers,
+      totalUsers: Number(usersRes.rows[0]?.total ?? 0)
+    },
+    line: recentRes.rows.map((row) => ({
+      label: row.created_on,
+      value: Number(row.total)
+    })),
+    pie: sourceRes.rows.map((row) => ({
+      label: row.source_type || "bilinmiyor",
+      value: Number(row.total)
+    })),
+    bar: [
+      { label: "Admin", value: authUser.role === "admin" ? Math.max(2, todayOffers) : 1 },
+      { label: "User", value: Math.max(1, totalOffers - todayOffers) }
+    ]
+  };
+});
+
+app.get("/users", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser || authUser.role !== "admin") {
+    return reply.code(403).send({ error: "Bu islem icin admin yetkisi gerekli" });
+  }
+
+  const res = await matchPool.query<{
+    id: string;
+    username: string;
+    full_name: string;
+    role: "admin" | "user";
+    is_active: boolean;
+    created_at: Date;
+  }>(
+    `SELECT id::text, username, full_name, role, is_active, created_at
+     FROM app_users
+     ORDER BY created_at DESC`
+  );
+
+  return {
+    items: res.rows.map((row) => ({
+      id: Number(row.id),
+      username: row.username,
+      fullName: row.full_name,
+      role: row.role,
+      isActive: row.is_active,
+      createdAt: row.created_at
+    }))
+  };
+});
+
+app.post<{
+  Body: {
+    username?: string;
+    password?: string;
+    fullName?: string;
+    role?: "admin" | "user";
+    isActive?: boolean;
+  };
+}>("/users", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser || authUser.role !== "admin") {
+    return reply.code(403).send({ error: "Bu islem icin admin yetkisi gerekli" });
+  }
+
+  const username = String(request.body?.username ?? "").trim();
+  const password = String(request.body?.password ?? "");
+  const fullName = String(request.body?.fullName ?? "").trim();
+  const role = request.body?.role === "admin" ? "admin" : "user";
+  const isActive = request.body?.isActive !== false;
+
+  if (!username || !password || !fullName) {
+    return reply.code(400).send({ error: "Tum alanlar zorunlu" });
+  }
+
+  const passwordHash = await hashPassword(password);
+  try {
+    const insertRes = await matchPool.query<{ id: string }>(
+      `INSERT INTO app_users(username, password_hash, full_name, role, is_active)
+       VALUES($1,$2,$3,$4,$5)
+       RETURNING id::text`,
+      [username, passwordHash, fullName, role, isActive]
+    );
+    return { ok: true, id: Number(insertRes.rows[0].id) };
+  } catch (error) {
+    if (String((error as { message?: string })?.message || "").includes("app_users_username_key")) {
+      return reply.code(409).send({ error: "Bu kullanici adi zaten var" });
+    }
+    throw error;
+  }
+});
+
+app.get("/matched-offers", async (request) => {
+  const authUser = await resolveRequestUser(request);
+  const params: unknown[] = [];
+  const whereSql = authUser?.role === "admin"
+    ? ""
+    : "WHERE mo.created_by_user_id = $1";
+  if (authUser?.role !== "admin") {
+    params.push(authUser?.id ?? 0);
+  }
+
+  const res = await matchPool.query<{
+    id: string;
+    title: string;
+    source_name: string | null;
+    source_type: string | null;
+    profile_name: string | null;
+    line_count: string;
+    status: string;
+    created_at: Date;
+    full_name: string | null;
+  }>(
+    `SELECT mo.id::text, mo.title, mo.source_name, mo.source_type, mo.profile_name,
+            mo.line_count::text, mo.status, mo.created_at, u.full_name
+     FROM matched_offers mo
+     LEFT JOIN app_users u ON u.id = mo.created_by_user_id
+     ${whereSql}
+     ORDER BY mo.created_at DESC
+     LIMIT 200`,
+    params
+  );
+
+  return {
+    items: res.rows.map((row) => ({
+      id: Number(row.id),
+      title: row.title,
+      sourceName: row.source_name,
+      sourceType: row.source_type,
+      profileName: row.profile_name,
+      lineCount: Number(row.line_count),
+      status: row.status,
+      createdAt: row.created_at,
+      createdBy: row.full_name
+    }))
+  };
+});
+
+app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  const offerId = Number(request.params.id);
+  if (!Number.isFinite(offerId) || offerId <= 0) {
+    return reply.code(400).send({ error: "Gecersiz kayit id" });
+  }
+
+  const offerRes = await matchPool.query<{
+    id: string;
+    title: string;
+    source_name: string | null;
+    source_type: string | null;
+    extraction_method: string | null;
+    profile_name: string | null;
+    created_by_user_id: string | null;
+    created_at: Date;
+  }>(
+    `SELECT id::text, title, source_name, source_type, extraction_method, profile_name, created_by_user_id::text, created_at
+     FROM matched_offers
+     WHERE id = $1
+     LIMIT 1`,
+    [offerId]
+  );
+
+  if (offerRes.rowCount === 0) {
+    return reply.code(404).send({ error: "Kayit bulunamadi" });
+  }
+
+  const offer = offerRes.rows[0];
+  if (authUser?.role !== "admin" && Number(offer.created_by_user_id || 0) !== authUser?.id) {
+    return reply.code(403).send({ error: "Bu kayda erisim yetkiniz yok" });
+  }
+
+  const linesRes = await matchPool.query<{
+    line_no: number;
+    match_history_id: string | null;
+    selected_stock_id: number | null;
+    stock_code: string | null;
+    stock_name: string | null;
+    birim: string | null;
+    quantity: string | null;
+    dim_kalinlik: string | null;
+    dim_en: string | null;
+    dim_boy: string | null;
+    kesim_durumu: string | null;
+    selected_score: string | null;
+    is_manual: boolean;
+  }>(
+    `SELECT line_no, match_history_id::text, selected_stock_id, stock_code, stock_name, birim,
+            quantity::text, dim_kalinlik::text, dim_en::text, dim_boy::text, kesim_durumu, selected_score::text, is_manual
+     FROM matched_offer_lines
+     WHERE matched_offer_id = $1
+     ORDER BY line_no`,
+    [offerId]
+  );
+
+  return {
+    offer: {
+      id: Number(offer.id),
+      title: offer.title,
+      sourceName: offer.source_name,
+      sourceType: offer.source_type,
+      extractionMethod: offer.extraction_method,
+      profileName: offer.profile_name,
+      createdAt: offer.created_at
+    },
+    rows: linesRes.rows.map((row) => ({
+      matchHistoryId: row.match_history_id ? Number(row.match_history_id) : null,
+      selected_stock_id: row.selected_stock_id && row.selected_stock_id > 0 ? row.selected_stock_id : null,
+      selected_score: row.selected_stock_id && row.selected_stock_id > 0 ? toSafeNumber(row.selected_score) : null,
+      quantity: toSafeNumber(row.quantity),
+      dimKalinlik: toSafeNumber(row.dim_kalinlik),
+      dimEn: toSafeNumber(row.dim_en),
+      dimBoy: toSafeNumber(row.dim_boy),
+      kesimDurumu: row.kesim_durumu,
+      isManual: row.is_manual,
+      stock_code: row.stock_code,
+      stock_name: row.stock_name,
+      birim: row.birim
+    }))
+  };
+});
+
+app.post<{ Body: SaveMatchedOfferBody }>("/matched-offers/save", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser) {
+    return reply.code(401).send({ error: "Unauthorized" });
+  }
+  if (!Array.isArray(request.body?.rows) || request.body.rows.length === 0) {
+    return reply.code(400).send({ error: "Kaydedilecek satir bulunamadi" });
+  }
+
+  const offerId = await upsertMatchedOffer(authUser.id, request.body);
+  return { ok: true, offerId };
+});
 
 app.get("/stocks", async () => {
   const res = await matchPool.query<{
@@ -866,6 +1333,9 @@ setInterval(() => {
 app.listen({ host: "0.0.0.0", port: env.apiPort })
   .then(() => {
     app.log.info(`matching-api listening on ${env.apiPort}`);
+    ensureDefaultAdminUser()
+      .then(() => app.log.info("default admin user verified"))
+      .catch((err) => app.log.error({ err }, "default admin verification failed"));
     retrainModelFromHistory()
       .then((m) => {
         if (!m) app.log.info("ml model not ready: insufficient feedback data");
