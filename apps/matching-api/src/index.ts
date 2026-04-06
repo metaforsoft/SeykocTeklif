@@ -1,6 +1,7 @@
 import path from "node:path";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
+import * as XLSX from "xlsx";
 import { extractFeaturesFromInput, MatchInput, CandidateRow, ParsedOrderDocument, ScoredResult, scoreCandidates as baseScoreCandidates } from "@smp/common";
 import { env, matchPool } from "@smp/db";
 import { getModelStatus, retrainModelFromHistory } from "./ml";
@@ -8,6 +9,7 @@ import { rerankResults } from "./rerank";
 import { extractSourceDocument } from "./source-extract";
 import { recordExtractionFeedback, saveExtractionProfile } from "./extraction-learning";
 import { authenticateCredentials, createSession, destroySession, ensureDefaultAdminUser, hashPassword, resolveRequestUser, shouldRedirectToLogin, isPublicPath } from "./auth";
+import { getLookupOptions, postUyumRequest } from "./uyum-lookups";
 
 const app = Fastify({ logger: true });
 
@@ -59,6 +61,7 @@ interface MatchedOfferLineInput {
   dimEn?: number | null;
   dimBoy?: number | null;
   kesimDurumu?: string | null;
+  mensei?: string | null;
   user_note?: string | null;
   header_context?: string | null;
   isManual?: boolean;
@@ -71,7 +74,71 @@ interface SaveMatchedOfferBody {
   sourceType?: string | null;
   extractionMethod?: string | null;
   profileName?: string | null;
+  offerDate?: string | null;
+  movementCode?: string | null;
+  customerCode?: string | null;
+  representativeCode?: string | null;
+  description?: string | null;
   rows: MatchedOfferLineInput[];
+}
+
+interface SendMatchedOfferToErpBody {
+  offerId?: number | null;
+  offerDate?: string | null;
+  movementCode?: string | null;
+  customerCode?: string | null;
+  representativeCode?: string | null;
+  description?: string | null;
+  rows: MatchedOfferLineInput[];
+}
+
+interface ExportMatchedTableRowInput {
+  sira?: number | null;
+  kalinlik?: number | null;
+  en?: number | null;
+  boy?: number | null;
+  stokKodu?: string | null;
+  stokAdi?: string | null;
+  birim?: string | null;
+  kesimDurumu?: string | null;
+  mensei?: string | null;
+  adet?: number | null;
+}
+
+interface InsertOfferDetailPayload {
+  lineType: string;
+  DcardCode: string;
+  ItemAttributeCode1?: string;
+  unitId: number;
+  qty: number;
+  unitPriceTra: number;
+  unitPrice: number;
+  vatId: number;
+  vatStatus: string;
+  whouseId: number;
+  amt: number;
+  amtTra: number;
+  lineNo: number;
+  curTraId: number;
+}
+
+interface InsertOfferPayload {
+  Value: {
+    sourceApp: string;
+    details: InsertOfferDetailPayload[];
+    EntityCode: string;
+    DocTraCode: string;
+    SalesPersonCode: string;
+    amt: number;
+    curTra: number;
+    curId: number;
+    coId: number;
+    branchId: number;
+  };
+}
+
+interface InsertOfferPayloadLowercase {
+  value: InsertOfferPayload["Value"];
 }
 
 function normalizeGuidanceText(value: string): string {
@@ -257,6 +324,116 @@ function toSafeNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizePositiveInteger(value: unknown): number | null {
+  const parsed = toSafeNumber(value);
+  if (!parsed || parsed <= 0) return null;
+  return Math.trunc(parsed);
+}
+
+function validateMatchedOfferErpInput(body: SendMatchedOfferToErpBody | undefined): { ok: true } | { ok: false; error: string } {
+  const offerId = normalizePositiveInteger(body?.offerId);
+  const movementCode = String(body?.movementCode ?? "").trim();
+  const customerCode = String(body?.customerCode ?? "").trim();
+  const representativeCode = String(body?.representativeCode ?? "").trim();
+  const rows = Array.isArray(body?.rows) ? body.rows : [];
+
+  if (!offerId) return { ok: false, error: "ERP'ye gondermeden once kayitli bir eslesme secilmeli" };
+  if (!movementCode) return { ok: false, error: "Hareket Kodu secilmeli" };
+  if (!customerCode) return { ok: false, error: "Cari secilmeli" };
+  if (!representativeCode) return { ok: false, error: "Musteri Temsilcisi secilmeli" };
+  if (rows.length === 0) return { ok: false, error: "Gonderilecek satir bulunamadi" };
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const selectedStockId = normalizePositiveInteger(row.selected_stock_id);
+    const quantity = normalizePositiveInteger(row.quantity);
+    if (!selectedStockId) {
+      return { ok: false, error: `Satir ${index + 1}: secili stok bulunamadi` };
+    }
+    if (!quantity) {
+      return { ok: false, error: `Satir ${index + 1}: adet pozitif olmali` };
+    }
+  }
+
+  return { ok: true };
+}
+
+async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise<InsertOfferPayload> {
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  const stockIds = [...new Set(rows.map((row) => normalizePositiveInteger(row.selected_stock_id)).filter((value): value is number => Boolean(value)))];
+  const stockRes = await matchPool.query<{ stock_id: number; stock_code: string | null }>(
+    `SELECT stock_id, stock_code
+     FROM stock_master
+     WHERE stock_id = ANY($1::bigint[])`,
+    [stockIds]
+  );
+
+  const stockCodeMap = new Map<number, string>(
+    stockRes.rows
+      .filter((row) => String(row.stock_code ?? "").trim())
+      .map((row) => [Number(row.stock_id), String(row.stock_code ?? "").trim()])
+  );
+
+  const details = rows.map((row, index) => {
+    const stockId = normalizePositiveInteger(row.selected_stock_id) as number;
+    const quantity = normalizePositiveInteger(row.quantity) as number;
+    const stockCode = stockCodeMap.get(stockId);
+    const mensei = String(row.mensei ?? "").trim().toLocaleUpperCase("tr-TR") || "İTHAL";
+    if (!stockCode) {
+      throw new Error(`Satir ${index + 1}: ERP stok kodu bulunamadi`);
+    }
+
+    const amount = quantity;
+    return {
+      lineType: "S",
+      DcardCode: stockCode,
+      ItemAttributeCode1: mensei,
+      unitId: 165,
+      qty: quantity,
+      unitPriceTra: 1,
+      unitPrice: 1,
+      vatId: 424,
+      vatStatus: "Hariç",
+      whouseId: 3681,
+      amt: amount,
+      amtTra: 0,
+      lineNo: (index + 1) * 10,
+      curTraId: 114
+    };
+  });
+
+  return {
+    Value: {
+      sourceApp: "SatışTeklifi",
+      details,
+      EntityCode: String(body.customerCode ?? "").trim(),
+      DocTraCode: String(body.movementCode ?? "").trim(),
+      SalesPersonCode: String(body.representativeCode ?? "").trim(),
+      amt: details.reduce((sum, item) => sum + item.amt, 0),
+      curTra: 2220,
+      curId: 114,
+      coId: 2715,
+      branchId: 6749
+    }
+  };
+}
+
+async function sendInsertOfferToUyum(payload: InsertOfferPayload): Promise<unknown> {
+  try {
+    return await postUyumRequest("/UyumApi/v1/PSM/InsertOffer", payload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("HTTP 417")) {
+      throw error;
+    }
+
+    const fallbackPayload: InsertOfferPayloadLowercase = {
+      value: payload.Value
+    };
+    return await postUyumRequest("/UyumApi/v1/PSM/InsertOffer", fallbackPayload);
+  }
+}
+
 async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferBody): Promise<number> {
   const rows = Array.isArray(body.rows) ? body.rows : [];
   const client = await matchPool.connect();
@@ -265,12 +442,20 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
 
     const normalizedTitle = String(body.title ?? "").trim() || String(body.sourceName ?? "").trim() || `Teklif ${new Date().toISOString()}`;
     const lineCount = rows.length;
+    const offerDate = String(body.offerDate ?? "").trim() || null;
+    const movementCode = String(body.movementCode ?? "").trim() || null;
+    const customerCode = String(body.customerCode ?? "").trim() || null;
+    const representativeCode = String(body.representativeCode ?? "").trim() || null;
+    const description = String(body.description ?? "").trim() || null;
     let offerId = Number(body.offerId);
 
     if (!Number.isFinite(offerId) || offerId <= 0) {
       const insertRes = await client.query<{ id: string }>(
-        `INSERT INTO matched_offers(title, source_name, source_type, extraction_method, profile_name, created_by_user_id, line_count, status)
-         VALUES($1,$2,$3,$4,$5,$6,$7,'saved')
+        `INSERT INTO matched_offers(
+           title, source_name, source_type, extraction_method, profile_name, created_by_user_id, line_count, status,
+           offer_date, movement_code, customer_code, representative_code, description
+         )
+         VALUES($1,$2,$3,$4,$5,$6,$7,'saved',$8,$9,$10,$11,$12)
          RETURNING id::text`,
         [
           normalizedTitle,
@@ -279,11 +464,30 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           String(body.extractionMethod ?? "").trim() || null,
           String(body.profileName ?? "").trim() || null,
           currentUserId,
-          lineCount
+          lineCount,
+          offerDate,
+          movementCode,
+          customerCode,
+          representativeCode,
+          description
         ]
       );
       offerId = Number(insertRes.rows[0].id);
     } else {
+      const existingRes = await client.query<{ status: string | null }>(
+        `SELECT status
+         FROM matched_offers
+         WHERE id=$1
+         LIMIT 1`,
+        [offerId]
+      );
+      if (existingRes.rowCount === 0) {
+        throw new Error("Kayit bulunamadi");
+      }
+      if (String(existingRes.rows[0]?.status ?? "").trim().toLowerCase() === "sent") {
+        throw new Error("Kayitli eslesme degistirilemez");
+      }
+
       await client.query(
         `UPDATE matched_offers
          SET title=$2,
@@ -292,6 +496,11 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
              extraction_method=$5,
              profile_name=$6,
              line_count=$7,
+             offer_date=$8,
+             movement_code=$9,
+             customer_code=$10,
+             representative_code=$11,
+             description=$12,
              updated_at=NOW()
          WHERE id=$1`,
         [
@@ -301,7 +510,12 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           String(body.sourceType ?? "").trim() || null,
           String(body.extractionMethod ?? "").trim() || null,
           String(body.profileName ?? "").trim() || null,
-          lineCount
+          lineCount,
+          offerDate,
+          movementCode,
+          customerCode,
+          representativeCode,
+          description
         ]
       );
       await client.query("DELETE FROM matched_offer_lines WHERE matched_offer_id = $1", [offerId]);
@@ -596,6 +810,7 @@ app.get("/matched-offers", async (request) => {
       profileName: row.profile_name,
       lineCount: Number(row.line_count),
       status: row.status,
+      sentToErp: row.status === "sent",
       createdAt: row.created_at,
       createdBy: row.full_name
     }))
@@ -616,10 +831,19 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
     source_type: string | null;
     extraction_method: string | null;
     profile_name: string | null;
+    offer_date: string | null;
+    movement_code: string | null;
+    customer_code: string | null;
+    representative_code: string | null;
+    description: string | null;
+    status: string | null;
     created_by_user_id: string | null;
     created_at: Date;
   }>(
-    `SELECT id::text, title, source_name, source_type, extraction_method, profile_name, created_by_user_id::text, created_at
+    `SELECT id::text, title, source_name, source_type, extraction_method, profile_name,
+            TO_CHAR(offer_date, 'YYYY-MM-DD') AS offer_date,
+            movement_code, customer_code, representative_code, description,
+            status, created_by_user_id::text, created_at
      FROM matched_offers
      WHERE id = $1
      LIMIT 1`,
@@ -666,6 +890,13 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
       sourceType: offer.source_type,
       extractionMethod: offer.extraction_method,
       profileName: offer.profile_name,
+      offerDate: offer.offer_date,
+      movementCode: offer.movement_code,
+      customerCode: offer.customer_code,
+      representativeCode: offer.representative_code,
+      description: offer.description,
+      status: offer.status,
+      sentToErp: offer.status === "sent",
       createdAt: offer.created_at
     },
     rows: linesRes.rows.map((row) => ({
@@ -694,8 +925,113 @@ app.post<{ Body: SaveMatchedOfferBody }>("/matched-offers/save", async (request,
     return reply.code(400).send({ error: "Kaydedilecek satir bulunamadi" });
   }
 
-  const offerId = await upsertMatchedOffer(authUser.id, request.body);
-  return { ok: true, offerId };
+  try {
+    const offerId = await upsertMatchedOffer(authUser.id, request.body);
+    return { ok: true, offerId };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message === "Kayit bulunamadi") {
+      return reply.code(404).send({ error: message });
+    }
+    if (message === "Kayitli eslesme degistirilemez") {
+      return reply.code(409).send({ error: message });
+    }
+    throw error;
+  }
+});
+
+app.post<{ Body: SendMatchedOfferToErpBody }>("/matched-offers/send-erp", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser) {
+    return reply.code(401).send({ error: "Unauthorized" });
+  }
+
+  const validation = validateMatchedOfferErpInput(request.body);
+  if (!validation.ok) {
+    return reply.code(400).send({ error: validation.error });
+  }
+
+  try {
+    const offerId = normalizePositiveInteger(request.body?.offerId);
+    if (offerId) {
+      const existingRes = await matchPool.query<{ status: string | null }>(
+        `SELECT status
+         FROM matched_offers
+         WHERE id=$1
+         LIMIT 1`,
+        [offerId]
+      );
+      if (existingRes.rowCount === 0) {
+        return reply.code(404).send({ error: "Kayit bulunamadi" });
+      }
+      if (String(existingRes.rows[0]?.status ?? "").trim().toLowerCase() === "sent") {
+        return reply.code(409).send({ error: "Bu eslesme ERP'ye daha once gonderilmis" });
+      }
+    }
+
+    const payload = await buildInsertOfferPayload(request.body);
+    const uyumResponse = await sendInsertOfferToUyum(payload);
+    if (offerId) {
+      await matchPool.query(
+        `UPDATE matched_offers
+         SET status='sent', updated_at=NOW()
+         WHERE id=$1`,
+        [offerId]
+      );
+    }
+    return {
+      ok: true,
+      offerId: offerId ?? null,
+      payload,
+      uyumResponse
+    };
+  } catch (error) {
+    request.log.error({ err: error, offerId: request.body?.offerId ?? null }, "matched offer send to erp failed");
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(500).send({ error: message });
+  }
+});
+
+app.post<{ Body: { rows?: ExportMatchedTableRowInput[] } }>("/exports/matched-table", async (request, reply) => {
+  const rows = Array.isArray(request.body?.rows) ? request.body.rows : [];
+  if (rows.length === 0) {
+    return reply.code(400).send({ error: "Aktarılacak satır bulunamadı" });
+  }
+
+  const exportRows = rows.map((row, index) => ({
+    "Sıra": Number.isFinite(Number(row.sira)) ? Number(row.sira) : index + 1,
+    "Kalınlık": row.kalinlik ?? "",
+    "En": row.en ?? "",
+    "Boy": row.boy ?? "",
+    "Stok Kodu": String(row.stokKodu ?? "").trim(),
+    "Stok Adı": String(row.stokAdi ?? "").trim(),
+    "Birim": String(row.birim ?? "").trim(),
+    "Kesim Durumu": String(row.kesimDurumu ?? "").trim(),
+    "Menşei": String(row.mensei ?? "").trim(),
+    "Adet": row.adet ?? ""
+  }));
+
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.json_to_sheet(exportRows);
+  worksheet["!cols"] = [
+    { wch: 8 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 24 },
+    { wch: 42 },
+    { wch: 10 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 10 }
+  ];
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Eslestirilen Satirlar");
+
+  const fileBuffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  reply.header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  reply.header("Content-Disposition", `attachment; filename="eslestirilen-satirlar-${stamp}.xlsx"`);
+  return reply.send(fileBuffer);
 });
 
 app.get("/stocks", async () => {
@@ -758,6 +1094,21 @@ app.get("/stocks", async () => {
       dim_text: row.dim_text
     }))
   };
+});
+
+app.get<{ Params: { lookupKey: string }; Querystring: { q?: string; limit?: string } }>("/lookups/:lookupKey", async (request, reply) => {
+  try {
+    const items = await getLookupOptions(String(request.params.lookupKey ?? "").trim(), {
+      query: String(request.query?.q ?? "").trim(),
+      limit: Number(request.query?.limit ?? 30)
+    });
+    return { items };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const statusCode = message.startsWith("Unknown lookup key:") ? 404 : 500;
+    request.log.error({ err: error, lookupKey: request.params.lookupKey }, "lookup fetch failed");
+    return reply.code(statusCode).send({ error: message });
+  }
 });
 
 app.post<{

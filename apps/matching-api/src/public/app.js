@@ -1,4 +1,4 @@
-const el = (id) => document.getElementById(id);
+﻿const el = (id) => document.getElementById(id);
 
 const textWrap = el("textWrap");
 const docWrap = el("docWrap");
@@ -16,6 +16,8 @@ const profileNameEl = el("profileName");
 const resultBodyEl = el("resultBody");
 const saveStatusEl = el("saveStatus");
 const addRowBtnEl = el("addRowBtn");
+const exportTableBtnEl = el("exportTableBtn");
+const sendMatchedOfferToErpBtnEl = el("sendMatchedOfferToErpBtn");
 const stockModalEl = el("stockModal");
 const allStockSearchEl = el("allStockSearch");
 const allStockTableBodyEl = el("allStockTableBody");
@@ -43,6 +45,14 @@ const offerNakliyeSekliEl = el("offerNakliyeSekli");
 const offerLineBodyEl = el("offerLineBody");
 const saveOfferDraftBtnEl = el("saveOfferDraftBtn");
 const sendOfferBtnEl = el("sendOfferBtn");
+const offerMetaToggleBtnEl = el("offerMetaToggleBtn");
+const offerMetaPanelEl = el("offerMetaPanel");
+const offerMetaChevronEl = el("offerMetaChevron");
+const offerMetaDateEl = el("offerMetaDate");
+const offerMetaMovementCodeEl = el("offerMetaMovementCode");
+const offerMetaCustomerEl = el("offerMetaCustomer");
+const offerMetaRepresentativeEl = el("offerMetaRepresentative");
+const offerMetaDescriptionEl = el("offerMetaDescription");
 
 let sourceMode = "text";
 let rows = [];
@@ -55,6 +65,11 @@ let offerDraftId = null;
 let instructionDrawerOpen = false;
 let pendingChatLearning = null;
 let currentMatchedOfferId = null;
+let offerMetaOpen = false;
+let matchedOfferLocked = false;
+
+const OFFER_META_OPTIONS = {
+};
 
 const SOURCE_TYPE_LABELS = {
   text: "Metin",
@@ -101,6 +116,187 @@ function currentMatchInstruction() {
   return matchInstructionTextEl?.value?.trim() || "";
 }
 
+function extractInstructionSet(text, options = {}) {
+  const normalized = String(text ?? "").trim().toLocaleLowerCase("tr-TR");
+  if (!normalized) return {};
+
+  const set = {};
+  const kesimVarIndex = Math.max(normalized.lastIndexOf("kesim var"), normalized.lastIndexOf("kemim var"));
+  const kesimYokIndex = Math.max(normalized.lastIndexOf("kesim yok"), normalized.lastIndexOf("kemim yok"));
+  if (kesimVarIndex >= 0 || kesimYokIndex >= 0) {
+    set.kesimDurumu = kesimYokIndex > kesimVarIndex ? "Kesim Yok" : "Kesim Var";
+  }
+
+  const allowImplicitMensei = Boolean(options.allowImplicitMensei);
+  const mentionsMensei = normalized.includes("menşei") || normalized.includes("mensei");
+  if (mentionsMensei || allowImplicitMensei) {
+    if (normalized.includes("yerli")) {
+      set.mensei = "YERLİ";
+    } else if (normalized.includes("ithal")) {
+      set.mensei = "İTHAL";
+    }
+  }
+
+  const adetMatch = normalized.match(/adet\s*(?:=|:)?\s*(\d+)/i) || normalized.match(/(\d+)\s*adet/i);
+  if (adetMatch) {
+    const quantity = Number(adetMatch[1]);
+    if (Number.isFinite(quantity) && quantity > 0) {
+      set.quantity = quantity;
+    }
+  }
+
+  return set;
+}
+
+function isDirectEditCommand(message) {
+  const commands = parseInstructionCommands(message);
+  return commands.some((command) => command?.set && Object.keys(command.set).length > 0);
+}
+
+function parseInstructionCommands(message) {
+  const normalized = String(message ?? "").trim().toLocaleLowerCase("tr-TR");
+  if (!normalized) return [];
+
+  const commands = [];
+  const rowRefPattern = /(\d+)\.\s*sat[ıi]r(?:ı|i|a|e|da|de|daki|deki|icin|için)?/g;
+  const rowRefs = [...normalized.matchAll(rowRefPattern)];
+
+  if (rowRefs.length > 0) {
+    const segments = [];
+    rowRefs.forEach((match, index) => {
+      const rowIndex = Number(match[1]) - 1;
+      const clauseStart = (match.index ?? 0) + match[0].length;
+      const clauseEnd = index + 1 < rowRefs.length ? (rowRefs[index + 1].index ?? normalized.length) : normalized.length;
+      const clause = normalized.slice(clauseStart, clauseEnd).trim();
+      const set = extractInstructionSet(clause, { allowImplicitMensei: true });
+      if (rowIndex >= 0 && Object.keys(set).length > 0) {
+        commands.push({
+          scope: "row",
+          rowIndex,
+          rowNumber: rowIndex + 1,
+          set
+        });
+      }
+      segments.push([match.index ?? 0, clauseEnd]);
+    });
+
+    let remaining = normalized;
+    segments
+      .sort((a, b) => b[0] - a[0])
+      .forEach(([start, end]) => {
+        remaining = `${remaining.slice(0, start)} ${remaining.slice(end)}`;
+      });
+
+    const globalSet = extractInstructionSet(remaining, {
+      allowImplicitMensei: remaining.includes("eşleşen") || remaining.includes("tum") || remaining.includes("tüm") || remaining.includes("bütün") || remaining.includes("hepsi")
+    });
+    if (Object.keys(globalSet).length > 0) {
+      commands.unshift({ scope: "all", set: globalSet });
+    }
+    return commands;
+  }
+
+  const globalSet = extractInstructionSet(normalized, {
+    allowImplicitMensei: normalized.includes("eşleşen") || normalized.includes("satırlar") || normalized.includes("satirlarda") || normalized.includes("satırlarda") || normalized.includes("tum") || normalized.includes("tüm") || normalized.includes("bütün") || normalized.includes("hepsi")
+  });
+  if (Object.keys(globalSet).length > 0) {
+    commands.push({ scope: "all", set: globalSet });
+  }
+  return commands;
+}
+
+function validateInstructionCommands(commands) {
+  const valid = [];
+  const ignored = [];
+
+  commands.forEach((command) => {
+    if (!command || !command.set || Object.keys(command.set).length === 0) {
+      ignored.push({ reason: "empty" });
+      return;
+    }
+    if (command.scope === "row") {
+      if (!Number.isInteger(command.rowIndex) || command.rowIndex < 0 || command.rowIndex >= rows.length) {
+        ignored.push({ reason: "row-out-of-range", rowNumber: command.rowNumber });
+        return;
+      }
+    }
+    valid.push(command);
+  });
+
+  return { valid, ignored };
+}
+
+function applyInstructionCommands(commands) {
+  const touchedRows = new Set();
+  const applied = [];
+
+  const applySetToRow = (row, set, rowIndex) => {
+    let changed = false;
+    if (set.kesimDurumu && row.kesimDurumu !== set.kesimDurumu) {
+      row.kesimDurumu = set.kesimDurumu;
+      changed = true;
+    }
+    if (set.mensei && row.mensei !== set.mensei) {
+      row.mensei = set.mensei;
+      changed = true;
+    }
+    if (Number.isFinite(Number(set.quantity)) && Number(set.quantity) > 0) {
+      const nextQuantity = Number(set.quantity);
+      if (Number(row.quantity) !== nextQuantity) {
+        row.quantity = nextQuantity;
+        row.offer_adet = nextQuantity;
+        changed = true;
+      }
+    }
+    if (changed) {
+      touchedRows.add(rowIndex);
+    }
+    return changed;
+  };
+
+  commands.forEach((command) => {
+    if (command.scope === "all") {
+      let changedCount = 0;
+      rows.forEach((row, index) => {
+        if (applySetToRow(row, command.set, index)) changedCount += 1;
+      });
+      applied.push({ ...command, changedCount });
+      return;
+    }
+
+    const changed = applySetToRow(rows[command.rowIndex], command.set, command.rowIndex);
+    applied.push({ ...command, changedCount: changed ? 1 : 0 });
+  });
+
+  return { applied, changedRows: touchedRows.size };
+}
+
+function describeInstructionCommands(applied, ignored) {
+  const notes = [];
+
+  applied.forEach((command) => {
+    const parts = [];
+    if (command.set.kesimDurumu) parts.push(`Kesim=${command.set.kesimDurumu}`);
+    if (command.set.mensei) parts.push(`Menşei=${command.set.mensei}`);
+    if (Number.isFinite(Number(command.set.quantity))) parts.push(`Adet=${Number(command.set.quantity)}`);
+    if (parts.length === 0) return;
+
+    if (command.scope === "all") {
+      notes.push(`tüm satırlarda ${parts.join(", ")}`);
+    } else {
+      notes.push(`${command.rowNumber}. satırda ${parts.join(", ")}`);
+    }
+  });
+
+  ignored.forEach((item) => {
+    if (item.reason === "row-out-of-range") {
+      notes.push(`${item.rowNumber}. satır yok, komut atlandı`);
+    }
+  });
+
+  return notes;
+}
+
 function candidateCount() {
   const value = Number(topKEl?.value || 5);
   return Math.max(1, Math.min(20, value));
@@ -119,18 +315,221 @@ function setAnalyzeBusy(isBusy) {
   if (instructionChatSendBtnEl) instructionChatSendBtnEl.disabled = busy;
 }
 
-function setAnalysisModal(open, detailText = "") {
+function setAnalysisModal(open, detailText = "", titleText = "Analiz ediliyor...") {
   if (!analysisModalEl) return;
   const isOpen = Boolean(open);
   analysisModalEl.classList.toggle("hidden", !isOpen);
   analysisModalEl.setAttribute("aria-hidden", isOpen ? "false" : "true");
   if (analysisModalTitleEl) {
-    analysisModalTitleEl.textContent = isOpen ? "Analiz ediliyor..." : "";
+    analysisModalTitleEl.textContent = isOpen ? titleText : "";
   }
   if (analysisModalDetailEl) {
     analysisModalDetailEl.textContent = isOpen ? (detailText || "İşlem devam ediyor...") : "";
   }
   setAnalyzeBusy(isOpen);
+}
+
+function setMatchedOfferLocked(next) {
+  matchedOfferLocked = Boolean(next);
+
+  [
+    orderTextEl,
+    fileInputEl,
+    topKEl,
+    analyzeBtnEl,
+    strongAnalyzeBtnEl,
+    addRowBtnEl,
+    el("saveBtn"),
+    sendMatchedOfferToErpBtnEl,
+    offerMetaDateEl,
+    offerMetaMovementCodeEl,
+    offerMetaCustomerEl,
+    offerMetaRepresentativeEl,
+    offerMetaDescriptionEl
+  ].forEach((control) => {
+    if (control) {
+      control.disabled = matchedOfferLocked;
+    }
+  });
+
+  document.querySelectorAll(".lookup-picker input").forEach((input) => {
+    input.disabled = matchedOfferLocked;
+  });
+
+  resultBodyEl?.querySelectorAll("input, select, button").forEach((control) => {
+    control.disabled = matchedOfferLocked;
+  });
+}
+
+function fillSelectOptions(selectEl, options) {
+  if (!selectEl) return;
+  const baseOption = selectEl.querySelector('option[value=""]')?.outerHTML || '<option value="">Seçiniz</option>';
+  selectEl.innerHTML = [
+    baseOption,
+    ...options.map((option) => {
+      const value = typeof option === "string" ? option : String(option?.value ?? "");
+      const label = typeof option === "string" ? option : String(option?.label ?? option?.value ?? "");
+      return `<option value="${value}">${label}</option>`;
+    })
+  ].join("");
+}
+
+function selectedOptionLabel(selectEl) {
+  return selectEl?.selectedOptions?.[0]?.textContent?.trim() || "";
+}
+
+async function fetchLookupOptions(lookupKey, query = "", limit = 30) {
+  const params = new URLSearchParams();
+  if (query) params.set("q", query);
+  params.set("limit", String(limit));
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const res = await api(`/lookups/${lookupKey}${suffix}`, "GET");
+  return Array.isArray(res.items) ? res.items : [];
+}
+
+function setupLookupPicker(selectEl, config) {
+  if (!selectEl) return;
+
+  selectEl.style.display = "none";
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "lookup-picker";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = config.placeholder;
+  input.autocomplete = "off";
+  selectEl._lookupInput = input;
+
+  const menu = document.createElement("div");
+  menu.className = "lookup-picker-menu hidden";
+
+  selectEl.parentNode.insertBefore(wrapper, selectEl);
+  wrapper.appendChild(input);
+  wrapper.appendChild(menu);
+  wrapper.appendChild(selectEl);
+
+  let debounceId = null;
+  let requestId = 0;
+
+  const closeMenu = () => menu.classList.add("hidden");
+  const openMenu = () => menu.classList.remove("hidden");
+
+  const renderOptions = (options) => {
+    if (!options.length) {
+      menu.innerHTML = '<div class="lookup-picker-empty">Sonuc bulunamadi.</div>';
+      openMenu();
+      return;
+    }
+
+    menu.innerHTML = options.map((option, index) => `
+      <button type="button" class="lookup-picker-item" data-k="lookup-item" data-i="${index}">
+        ${option.label ?? option.value ?? ""}
+      </button>
+    `).join("");
+
+    menu.querySelectorAll("[data-k='lookup-item']").forEach((button) => {
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        const hit = options[Number(button.dataset.i)];
+        if (!hit) return;
+        fillSelectOptions(selectEl, [hit]);
+        selectEl.value = String(hit.value ?? "");
+        input.value = String(hit.label ?? hit.value ?? "");
+        selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+        closeMenu();
+      });
+    });
+
+    openMenu();
+  };
+
+  const search = async (query) => {
+    if (query.trim().length < (config.minChars ?? 0)) {
+      closeMenu();
+      return;
+    }
+
+    const currentRequestId = ++requestId;
+    menu.innerHTML = '<div class="lookup-picker-empty">Yukleniyor...</div>';
+    openMenu();
+    try {
+      const options = await fetchLookupOptions(config.lookupKey, query.trim(), config.limit ?? 30);
+      if (currentRequestId !== requestId) return;
+      renderOptions(options);
+    } catch (error) {
+      menu.innerHTML = `<div class="lookup-picker-empty">Arama hatasi: ${error.message}</div>`;
+      openMenu();
+    }
+  };
+
+  input.addEventListener("focus", () => {
+    void search(input.value.trim());
+  });
+
+  input.addEventListener("input", () => {
+    fillSelectOptions(selectEl, []);
+    if (debounceId) clearTimeout(debounceId);
+    debounceId = setTimeout(() => {
+      void search(input.value.trim());
+    }, 220);
+  });
+
+  input.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      closeMenu();
+      if (!selectEl.value) {
+        input.value = "";
+      }
+    }, 120);
+  });
+
+  selectEl.addEventListener("change", () => {
+    if (selectEl.value) {
+      input.value = selectedOptionLabel(selectEl);
+    }
+  });
+}
+
+function setOfferMetaOpen(next) {
+  offerMetaOpen = Boolean(next);
+  offerMetaPanelEl?.classList.toggle("hidden", !offerMetaOpen);
+  offerMetaPanelEl?.setAttribute("aria-hidden", offerMetaOpen ? "false" : "true");
+  offerMetaToggleBtnEl?.setAttribute("aria-expanded", offerMetaOpen ? "true" : "false");
+  if (offerMetaChevronEl) {
+    offerMetaChevronEl.textContent = offerMetaOpen ? "-" : "+";
+  }
+}
+
+function initializeOfferMetaPanel() {
+  setupLookupPicker(offerMetaMovementCodeEl, {
+    lookupKey: "movement-codes",
+    placeholder: "Kod veya aciklama yazarak ara...",
+    minChars: 0,
+    limit: 30
+  });
+  setupLookupPicker(offerMetaCustomerEl, {
+    lookupKey: "customers",
+    placeholder: "Cari kodu veya unvan yazarak ara...",
+    minChars: 2,
+    limit: 40
+  });
+  setupLookupPicker(offerMetaRepresentativeEl, {
+    lookupKey: "representatives",
+    placeholder: "Temsilci kodu veya adi yazarak ara...",
+    minChars: 1,
+    limit: 30
+  });
+
+  if (offerMetaDateEl && !offerMetaDateEl.value) {
+    offerMetaDateEl.value = new Date().toISOString().slice(0, 10);
+  }
+
+  offerMetaToggleBtnEl?.addEventListener("click", () => {
+    setOfferMetaOpen(!offerMetaOpen);
+  });
+
+  setOfferMetaOpen(false);
 }
 
 function setInstructionDrawerOpen(next) {
@@ -181,7 +580,7 @@ function currentSourceName() {
     const firstLine = textValue.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "Metin girdisi";
     return firstLine.slice(0, 80);
   }
-  return sourceMode === "doc" ? "Dokuman girdisi" : "Metin girdisi";
+  return sourceMode === "doc" ? "Doküman girdisi" : "Metin girdisi";
 }
 
 async function ensureChatProfileSavedForLearning(message, doc) {
@@ -219,35 +618,56 @@ async function rerunMatchingByInstruction(message) {
   if (matchInstructionTextEl) {
     matchInstructionTextEl.value = message;
   }
-  appendInstructionMessage("assistant", "Talimat alındı. Analiz ve eşleştirme birlikte yenileniyor...");
+  const directEdit = isDirectEditCommand(message) && rows.length > 0;
+  appendInstructionMessage("assistant", directEdit
+    ? "Talimat alındı. Mevcut satırlar üzerinde alan güncellemesi uygulanıyor..."
+    : "Talimat alındı. Analiz ve eşleştirme birlikte yenileniyor...");
 
   try {
-    setAnalysisModal(true, "Talimata gore analiz ve eslestirme yenileniyor...");
-    const canReextract = sourceMode === "text"
-      ? Boolean(orderTextEl?.value?.trim())
-      : Boolean(fileInputEl?.files?.[0]);
-    let doc = null;
-    if (canReextract) {
-      doc = await extractDocumentPayload();
-      extractedDoc = doc;
-      applyLearnedInstructions(doc);
-    } else if (extractedDoc) {
-      doc = extractedDoc;
+    saveStatusEl.textContent = "ERP'ye gönderiliyor...";
+    setAnalysisModal(true, "Teklif ERP sistemine gönderiliyor...", "ERP'ye Gönderiliyor...");
+    await flushStatusPaint();
+    const parsedCommands = parseInstructionCommands(message);
+    const { valid: validCommands, ignored: ignoredCommands } = validateInstructionCommands(parsedCommands);
+    let instructionResult = { applied: [], changedRows: 0 };
+
+    if (directEdit) {
+      instructionResult = applyInstructionCommands(validCommands);
+      renderTable();
     } else {
-      throw new Error("Önce metin veya doküman girin.");
-    }
-    await runAnalysis(doc, {
-      onProgress: ({ current, total }) => {
-        setAnalysisModal(true, `${current}/${total} satır talimata göre analiz/eşleştirme yapılıyor...`);
+      setAnalysisModal(true, "Talimata göre analiz ve eşleştirme yenileniyor...");
+      const canReextract = sourceMode === "text"
+        ? Boolean(orderTextEl?.value?.trim())
+        : Boolean(fileInputEl?.files?.[0]);
+      let doc = null;
+      if (canReextract) {
+        doc = await extractDocumentPayload();
+        extractedDoc = doc;
+        applyLearnedInstructions(doc);
+      } else if (extractedDoc) {
+        doc = extractedDoc;
+      } else {
+        throw new Error("Önce metin veya doküman girin.");
       }
-    });
+      await runAnalysis(doc, {
+        onProgress: ({ current, total }) => {
+          setAnalysisModal(true, `${current}/${total} satır talimata göre analiz/eşleştirme yapılıyor...`);
+        }
+      });
+      instructionResult = applyInstructionCommands(validCommands);
+      renderTable();
+    }
     pendingChatLearning = {
       message,
       createdAt: Date.now(),
       sourceMode,
       profileId: extractedDoc?.learning?.applied_profile_id ?? null
     };
-    appendInstructionMessage("assistant", `Tamamlandı. ${rows.length} satır talimata göre yenilendi. Bu talimat, Seçimleri Kaydet sonrası öğrenilecek.`);
+    const notes = describeInstructionCommands(instructionResult.applied, ignoredCommands);
+    const overrideNote = notes.length ? ` Uygulanan komutlar: ${notes.join(" | ")}.` : "";
+    appendInstructionMessage("assistant", directEdit
+      ? `Tamamlandı. ${instructionResult.changedRows} satır güncellendi.${overrideNote} Bu talimat, Seçimleri Kaydet sonrası öğrenilecek.`
+      : `Tamamlandı. ${rows.length} satır talimata göre yenilendi.${overrideNote} Bu talimat, Seçimleri Kaydet sonrası öğrenilecek.`);
   } catch (err) {
     appendInstructionMessage("assistant", `İşlem başarısız: ${err.message}`);
   } finally {
@@ -323,6 +743,37 @@ async function api(path, method, body) {
   return data;
 }
 
+async function downloadFile(path, method, body, fallbackFileName) {
+  const res = await fetch(path, {
+    method,
+    headers: method === "GET" ? undefined : { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    let data = {};
+    try {
+      data = JSON.parse(txt);
+    } catch {
+      data = { raw: txt };
+    }
+    throw new Error(data.message || data.error || `HTTP ${res.status}`);
+  }
+
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^"]+)"?/i);
+  const fileName = match?.[1] || fallbackFileName;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function fileToBase64(file) {
   const buffer = await file.arrayBuffer();
   let binary = "";
@@ -376,6 +827,7 @@ function createEmptyRow(overrides = {}) {
     dimEn: null,
     dimBoy: null,
     kesimDurumu: "Kesim Var",
+    mensei: "İTHAL",
     quantity: 1,
     series: null,
     header_context: null,
@@ -448,6 +900,9 @@ function ensureOfferDefaults(row) {
   if (row.offer_boy === undefined) row.offer_boy = defaultBoy;
   if (row.offer_adet === undefined || row.offer_adet === null) {
     row.offer_adet = Number(row.quantity) || 1;
+  }
+  if (row.mensei === undefined || row.mensei === null || row.mensei === "") {
+    row.mensei = "İTHAL";
   }
   if (row.offer_manuelStockAdi === undefined || row.offer_manuelStockAdi === null) {
     row.offer_manuelStockAdi = selectedCandidate(row)?.stock_name || "";
@@ -713,6 +1168,13 @@ function bindRowInputs() {
     });
   });
 
+  resultBodyEl.querySelectorAll("[data-k='mensei']").forEach((select) => {
+    select.addEventListener("change", (e) => {
+      const index = Number(e.target.dataset.i);
+      rows[index].mensei = e.target.value || "İTHAL";
+    });
+  });
+
   resultBodyEl.querySelectorAll("[data-k='qty']").forEach((input) => {
     input.addEventListener("input", (e) => {
       const index = Number(e.target.dataset.i);
@@ -725,7 +1187,7 @@ function bindRowInputs() {
 
 function renderTable() {
   if (rows.length === 0) {
-    resultBodyEl.innerHTML = '<tr><td colspan="11" class="muted center">Sonuç yok.</td></tr>';
+    resultBodyEl.innerHTML = '<tr><td colspan="12" class="muted center">Sonuç yok.</td></tr>';
     renderOfferLines();
     return;
   }
@@ -738,20 +1200,21 @@ function renderTable() {
     const en = row.dimEn ?? defaultEn;
     const boy = row.dimBoy ?? defaultBoy;
     const kesim = row.kesimDurumu || "Kesim Var";
+    const mensei = row.mensei || "İTHAL";
     return `
       <tr>
         <td>${index + 1}</td>
         <td>
-          <input data-k="dim-kalinlik" data-i="${index}" class="dim-input" value="${dimensionInput(kalinlik)}" />
+          <input data-k="dim-kalinlik" data-i="${index}" class="dim-input" value="${dimensionInput(kalinlik)}" ${matchedOfferLocked ? "disabled" : ""} />
         </td>
         <td>
-          <input data-k="dim-en" data-i="${index}" class="dim-input" value="${dimensionInput(en)}" />
+          <input data-k="dim-en" data-i="${index}" class="dim-input" value="${dimensionInput(en)}" ${matchedOfferLocked ? "disabled" : ""} />
         </td>
         <td>
-          <input data-k="dim-boy" data-i="${index}" class="dim-input" value="${dimensionInput(boy)}" />
+          <input data-k="dim-boy" data-i="${index}" class="dim-input" value="${dimensionInput(boy)}" ${matchedOfferLocked ? "disabled" : ""} />
         </td>
         <td class="stock-code-cell">
-          <select data-k="candidate-select" data-i="${index}" ${candidates.length === 0 ? "disabled" : ""}>
+          <select data-k="candidate-select" data-i="${index}" ${(candidates.length === 0 || matchedOfferLocked) ? "disabled" : ""}>
             ${candidates.length === 0 ? '<option value="">Stok seçin</option>' : ""}
             ${candidates.slice(0, candidateCount()).map((candidate) => `
               <option value="${candidate.stock_id}" ${Number(candidate.stock_id) === Number(row.selected_stock_id) ? "selected" : ""}>
@@ -762,13 +1225,19 @@ function renderTable() {
         </td>
         <td>${selected?.stock_name ?? "-"}</td>
         <td class="pick-cell">
-          <button type="button" class="btn-secondary mini-btn" data-k="open-stock-modal" data-i="${index}">...</button>
+          <button type="button" class="btn-secondary mini-btn" data-k="open-stock-modal" data-i="${index}" ${matchedOfferLocked ? "disabled" : ""}>...</button>
         </td>
         <td>${selected?.birim ?? "-"}</td>
         <td>
-          <select data-k="kesim" data-i="${index}" class="cut-select">
+          <select data-k="kesim" data-i="${index}" class="cut-select" ${matchedOfferLocked ? "disabled" : ""}>
             <option value="Kesim Var" ${kesim === "Kesim Var" ? "selected" : ""}>Kesim Var</option>
             <option value="Kesim Yok" ${kesim === "Kesim Yok" ? "selected" : ""}>Kesim Yok</option>
+          </select>
+        </td>
+        <td>
+          <select data-k="mensei" data-i="${index}" class="cut-select" ${matchedOfferLocked ? "disabled" : ""}>
+            <option value="İTHAL" ${mensei === "İTHAL" ? "selected" : ""}>İTHAL</option>
+            <option value="YERLİ" ${mensei === "YERLİ" ? "selected" : ""}>YERLİ</option>
           </select>
         </td>
         <td>
@@ -780,6 +1249,7 @@ function renderTable() {
             pattern="[0-9]*"
             value="${numericInput(row.quantity)}"
             placeholder="Adet"
+            ${matchedOfferLocked ? "disabled" : ""}
           />
         </td>
         <td class="row-actions-cell">
@@ -795,6 +1265,7 @@ function renderTable() {
   bindCandidateControls();
   bindRowInputs();
   renderOfferLines();
+  setMatchedOfferLocked(matchedOfferLocked);
 }
 
 async function runAnalysis(doc, options = {}) {
@@ -865,10 +1336,30 @@ function mapRowsForOfferSave() {
     dimEn: row.dimEn ?? null,
     dimBoy: row.dimBoy ?? null,
     kesimDurumu: row.kesimDurumu ?? null,
+    mensei: row.mensei ?? "İTHAL",
     user_note: row.user_note ?? null,
     header_context: row.header_context ?? null,
     isManual: Boolean(row.isManual)
   }));
+}
+
+function collectMatchedTableExportRows() {
+  return rows.map((row, index) => {
+    ensureOfferDefaults(row);
+    const selected = selectedCandidate(row);
+    return {
+      sira: index + 1,
+      kalinlik: row.dimKalinlik ?? null,
+      en: row.dimEn ?? null,
+      boy: row.dimBoy ?? null,
+      stokKodu: selected?.stock_code ?? "",
+      stokAdi: selected?.stock_name ?? "",
+      birim: selected?.birim ?? "",
+      kesimDurumu: row.kesimDurumu ?? "Kesim Var",
+      mensei: row.mensei ?? "İTHAL",
+      adet: row.quantity ?? null
+    };
+  });
 }
 
 async function saveMatchedOfferRecord() {
@@ -880,16 +1371,80 @@ async function saveMatchedOfferRecord() {
     sourceType: extractedDoc?.source_type || (sourceMode === "doc" ? "doc" : "text"),
     extractionMethod: extractedDoc?.extraction_method || null,
     profileName: extractedDoc?.learning?.applied_profile_name || null,
+    ...collectMatchedOfferMeta(),
     rows: mapRowsForOfferSave()
   });
   currentMatchedOfferId = Number(result.offerId);
   return currentMatchedOfferId;
 }
 
+function collectMatchedOfferMeta() {
+  return {
+    offerDate: offerMetaDateEl?.value?.trim() || "",
+    movementCode: offerMetaMovementCodeEl?.value?.trim() || "",
+    customerCode: offerMetaCustomerEl?.value?.trim() || "",
+    representativeCode: offerMetaRepresentativeEl?.value?.trim() || "",
+    description: offerMetaDescriptionEl?.value?.trim() || ""
+  };
+}
+
+function applyMatchedOfferMeta(meta = {}) {
+  if (offerMetaDateEl) {
+    offerMetaDateEl.value = meta.offerDate || new Date().toISOString().slice(0, 10);
+  }
+  if (offerMetaMovementCodeEl) {
+    fillSelectOptions(offerMetaMovementCodeEl, meta.movementCode ? [{ value: meta.movementCode, label: meta.movementCode }] : []);
+    offerMetaMovementCodeEl.value = meta.movementCode || "";
+    if (offerMetaMovementCodeEl._lookupInput) {
+      offerMetaMovementCodeEl._lookupInput.value = meta.movementCode || "";
+    }
+    offerMetaMovementCodeEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (offerMetaCustomerEl) {
+    fillSelectOptions(offerMetaCustomerEl, meta.customerCode ? [{ value: meta.customerCode, label: meta.customerCode }] : []);
+    offerMetaCustomerEl.value = meta.customerCode || "";
+    if (offerMetaCustomerEl._lookupInput) {
+      offerMetaCustomerEl._lookupInput.value = meta.customerCode || "";
+    }
+    offerMetaCustomerEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (offerMetaRepresentativeEl) {
+    fillSelectOptions(offerMetaRepresentativeEl, meta.representativeCode ? [{ value: meta.representativeCode, label: meta.representativeCode }] : []);
+    offerMetaRepresentativeEl.value = meta.representativeCode || "";
+    if (offerMetaRepresentativeEl._lookupInput) {
+      offerMetaRepresentativeEl._lookupInput.value = meta.representativeCode || "";
+    }
+    offerMetaRepresentativeEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (offerMetaDescriptionEl) {
+    offerMetaDescriptionEl.value = meta.description || "";
+  }
+}
+
+async function flushStatusPaint() {
+  await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+}
+
+function validateMatchedOfferMeta() {
+  const meta = collectMatchedOfferMeta();
+  if (!meta.movementCode) {
+    throw new Error("Hareket Kodu seçilmeli.");
+  }
+  if (!meta.customerCode) {
+    throw new Error("Cari seçilmeli.");
+  }
+  if (!meta.representativeCode) {
+    throw new Error("Müşteri Temsilcisi seçilmeli.");
+  }
+  return meta;
+}
+
 async function loadMatchedOffer(recordId) {
   const data = await api(`/matched-offers/${recordId}`, "GET");
   const offer = data.offer || {};
   currentMatchedOfferId = Number(offer.id);
+  const offerStatus = String(offer.status || "").trim().toLowerCase();
+  setMatchedOfferLocked(offerStatus === "sent");
   rows = (Array.isArray(data.rows) ? data.rows : []).map((row) => {
     const stockId = Number(row.selected_stock_id) || null;
     const stockCode = row.stock_code || "-";
@@ -911,6 +1466,7 @@ async function loadMatchedOffer(recordId) {
       dimEn: row.dimEn ?? null,
       dimBoy: row.dimBoy ?? null,
       kesimDurumu: row.kesimDurumu || "Kesim Var",
+      mensei: row.mensei || "İTHAL",
       quantity: row.quantity ?? null,
       series: null,
       header_context: null,
@@ -929,8 +1485,11 @@ async function loadMatchedOffer(recordId) {
       applied_profile_name: offer.profileName || null
     }
   };
+  applyMatchedOfferMeta(offer);
   renderTable();
-  saveStatusEl.textContent = `Kayit yuklendi. Teklif #${currentMatchedOfferId} | Kaynak: ${offer.sourceName || offer.title || "-"}`;
+  saveStatusEl.textContent = matchedOfferLocked
+    ? `Kayıt yüklendi. Teklif #${currentMatchedOfferId} kayıtlı, değiştirme kapalı. | Kaynak: ${offer.sourceName || offer.title || "-"}`
+    : `Kayıt yüklendi. Teklif #${currentMatchedOfferId} | Kaynak: ${offer.sourceName || offer.title || "-"}`;
 }
 
 async function handleSelectedFile(file) {
@@ -1055,6 +1614,8 @@ teachBtnEl?.addEventListener("click", async () => {
     saveStatusEl.textContent = `Profil kaydedildi. ${profileName} (#${result.profileId}) sonraki benzer dosyalarda otomatik uygulanacak.`;
   } catch (err) {
     alert(err.message);
+  } finally {
+    setAnalysisModal(false);
   }
 });
 
@@ -1099,78 +1660,131 @@ function applyModalSelection() {
 selectStockBtnEl?.addEventListener("click", applyModalSelection);
 allStockSearchEl?.addEventListener("input", filterAllStocks);
 
-addRowBtnEl?.addEventListener("click", () => {
-  addManualRow();
-});
-
 el("saveBtn").addEventListener("click", async () => {
   if (rows.length === 0) {
-    alert("Once analiz yapin.");
+    alert("Önce analiz yapın.");
     return;
   }
 
-  const failed = [];
-  let success = 0;
-  const feedbackRows = rows
-    .map((row, index) => ({ row, index }))
-    .filter(({ row }) => Number.isFinite(Number(row.matchHistoryId)));
+  try {
+    saveStatusEl.textContent = "Kaydediliyor...";
+    setAnalysisModal(true, "Eşleştirme ve başlık bilgileri kaydediliyor...", "Kaydediliyor...");
+    await flushStatusPaint();
 
-  if (feedbackRows.length === 0) {
-    const offerId = await saveMatchedOfferRecord();
-    saveStatusEl.textContent = `Kaydedilecek eşleşme geri bildirimi yok. Manuel satırlar teklif olarak kaydedildi.${offerId ? ` Teklif kaydı: #${offerId}.` : ""}`;
+    const failed = [];
+    let success = 0;
+    const feedbackRows = rows
+      .map((row, index) => ({ row, index }))
+      .filter(({ row }) => Number.isFinite(Number(row.matchHistoryId)));
+
+    if (feedbackRows.length === 0) {
+      const offerId = await saveMatchedOfferRecord();
+      saveStatusEl.textContent = `Kaydedildi. Manuel satırlar teklif olarak kaydedildi.${offerId ? ` Teklif kaydı: #${offerId}.` : ""}`;
+      return;
+    }
+
+    for (const { row, index } of feedbackRows) {
+      if (!row.selected_stock_id) {
+        failed.push(`satır ${index + 1}: seçili stok yok`);
+        continue;
+      }
+      try {
+        await api("/feedback", "POST", {
+          matchHistoryId: row.matchHistoryId,
+          selected_stock_id: Number(row.selected_stock_id),
+          user_note: row.user_note || (row.quantity ? `adet:${row.quantity}` : null)
+        });
+        success += 1;
+      } catch (err) {
+        failed.push(`satır ${index + 1}: ${err.message}`);
+      }
+    }
+
+    const total = feedbackRows.length;
+    const manualCount = rows.length - feedbackRows.length;
+    if (success > 0 && extractedDoc) {
+      try {
+        if (pendingChatLearning?.message) {
+          const learning = await ensureChatProfileSavedForLearning(pendingChatLearning.message, extractedDoc);
+          if (learning?.profileId) {
+            pendingChatLearning.profileId = learning.profileId;
+          }
+        }
+        await api("/profiles/confirm", "POST", {
+          extractedDoc,
+          approved: failed.length === 0
+        });
+        if (pendingChatLearning?.message) {
+          if (failed.length === 0) {
+            appendInstructionMessage("assistant", `Talimat öğrenildi ve onaylandı${pendingChatLearning.profileId ? ` (#${pendingChatLearning.profileId})` : ""}.`);
+            pendingChatLearning = null;
+          } else {
+            appendInstructionMessage("assistant", "Kayıt kısmi tamamlandı. Talimat öğrenmesi tam onay için yeniden Seçimleri Kaydet bekliyor.");
+          }
+        }
+      } catch {
+        // Learning kaydi akisi bozmasin.
+      }
+    }
+
+    if (failed.length === 0) {
+      const offerId = await saveMatchedOfferRecord();
+      saveStatusEl.textContent = `Kaydedildi. ${success}/${total} satır kaydedildi.${manualCount > 0 ? ` Manuel satır: ${manualCount}.` : ""}${offerId ? ` Teklif kaydı: #${offerId}.` : ""}`;
+    } else {
+      const failLines = failed.map((item) => `- ${item}`).join("\n");
+      saveStatusEl.textContent = `Kısmi kayıt tamamlandı. Kaydedilen: ${success}/${total}${manualCount > 0 ? ` | Manuel satır: ${manualCount}` : ""}\nKaydedilemeyenler:\n${failLines}`;
+    }
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    setAnalysisModal(false);
+  }
+});
+
+exportTableBtnEl?.addEventListener("click", async () => {
+  if (rows.length === 0) {
+    alert("Önce analiz yapın.");
     return;
   }
 
-  for (const { row, index } of feedbackRows) {
-    if (!row.selected_stock_id) {
-      failed.push(`satır ${index + 1}: seçili stok yok`);
-      continue;
-    }
-    try {
-      await api("/feedback", "POST", {
-        matchHistoryId: row.matchHistoryId,
-        selected_stock_id: Number(row.selected_stock_id),
-        user_note: row.user_note || (row.quantity ? `adet:${row.quantity}` : null)
-      });
-      success += 1;
-    } catch (err) {
-      failed.push(`satır ${index + 1}: ${err.message}`);
-    }
+  try {
+    await downloadFile("/exports/matched-table", "POST", {
+      rows: collectMatchedTableExportRows()
+    }, "eslestirilen-satirlar.xlsx");
+    saveStatusEl.textContent = "Eşleştirilen satırlar Excel olarak indirildi.";
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+sendMatchedOfferToErpBtnEl?.addEventListener("click", async () => {
+  if (rows.length === 0) {
+    alert("Önce analiz yapın.");
+    return;
   }
 
-  const total = feedbackRows.length;
-  const manualCount = rows.length - feedbackRows.length;
-  if (success > 0 && extractedDoc) {
-    try {
-      if (pendingChatLearning?.message) {
-        const learning = await ensureChatProfileSavedForLearning(pendingChatLearning.message, extractedDoc);
-        if (learning?.profileId) {
-          pendingChatLearning.profileId = learning.profileId;
-        }
-      }
-      await api("/profiles/confirm", "POST", {
-        extractedDoc,
-        approved: failed.length === 0
-      });
-      if (pendingChatLearning?.message) {
-        if (failed.length === 0) {
-          appendInstructionMessage("assistant", `Talimat öğrenildi ve onaylandı${pendingChatLearning.profileId ? ` (#${pendingChatLearning.profileId})` : ""}.`);
-          pendingChatLearning = null;
-        } else {
-          appendInstructionMessage("assistant", "Kayıt kısmı tamamlandı. Talimat öğrenmesi tam onay için yeniden Seçimleri Kaydet bekliyor.");
-        }
-      }
-    } catch {
-      // Learning kaydi akisi bozmasin.
-    }
-  }
+  try {
+    saveStatusEl.textContent = "ERP'ye gönderiliyor...";
+    setAnalysisModal(true, "Teklif ERP sistemine gönderiliyor...", "ERP'ye Gönderiliyor...");
+    await flushStatusPaint();
 
-  if (failed.length === 0) {
-    const offerId = await saveMatchedOfferRecord();
-    saveStatusEl.textContent = `Kayıt başarılı. ${success}/${total} satır kaydedildi.${manualCount > 0 ? ` Manuel satır: ${manualCount}.` : ""}${offerId ? ` Teklif kaydı: #${offerId}.` : ""}`;
-  } else {
-    const failLines = failed.map((item) => `- ${item}`).join("\n");
-    saveStatusEl.textContent = `Kısmi kayıt tamamlandı. Kaydedilen: ${success}/${total}${manualCount > 0 ? ` | Manuel satır: ${manualCount}` : ""}\nKaydedilemeyenler:\n${failLines}`;
+    if (!Number.isFinite(Number(currentMatchedOfferId)) || Number(currentMatchedOfferId) <= 0) {
+      throw new Error("ERP'ye göndermeden önce Seçimleri Kaydet ile eşleşmeyi kaydetmelisiniz.");
+    }
+
+    const offerMeta = validateMatchedOfferMeta();
+    const offerId = Number(currentMatchedOfferId);
+    const result = await api("/matched-offers/send-erp", "POST", {
+      offerId,
+      ...offerMeta,
+      rows: mapRowsForOfferSave()
+    });
+
+    saveStatusEl.textContent = `ERP gönderimi tamamlandı. Teklif kaydı: #${offerId}. Uyum mesajı: ${result.uyumResponse?.message ?? "İşlem başarılı"}`;
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    setAnalysisModal(false);
   }
 });
 
@@ -1205,12 +1819,12 @@ function collectOfferPayload() {
     ensureOfferDefaults(row);
     const selected = selectedCandidate(row);
     if (!selected) {
-      throw new Error(`Satir ${index + 1}: secili stok yok.`);
+      throw new Error(`Satır ${index + 1}: seçili stok yok.`);
     }
 
     const quantity = Number(row.offer_adet ?? row.quantity ?? 0);
     if (!Number.isFinite(quantity) || quantity <= 0) {
-      throw new Error(`Satir ${index + 1}: adet pozitif olmali.`);
+      throw new Error(`Satır ${index + 1}: adet pozitif olmalı.`);
     }
 
     return {
@@ -1238,7 +1852,7 @@ function collectOfferPayload() {
 
 saveOfferDraftBtnEl?.addEventListener("click", async () => {
   if (rows.length === 0) {
-    alert("Once analiz yapip satir olusturun.");
+    alert("Önce analiz yapıp satır oluşturun.");
     return;
   }
 
@@ -1246,7 +1860,7 @@ saveOfferDraftBtnEl?.addEventListener("click", async () => {
     const payload = collectOfferPayload();
     const result = await api("/offers/save-draft", "POST", payload);
     offerDraftId = Number(result.draftId);
-    saveStatusEl.textContent = `Teklif taslagi kaydedildi. Draft No: ${offerDraftId} | Satir: ${result.lineCount}`;
+    saveStatusEl.textContent = `Teklif taslağı kaydedildi. Draft No: ${offerDraftId} | Satır: ${result.lineCount}`;
   } catch (err) {
     alert(err.message);
   }
@@ -1254,7 +1868,7 @@ saveOfferDraftBtnEl?.addEventListener("click", async () => {
 
 sendOfferBtnEl?.addEventListener("click", async () => {
   if (rows.length === 0) {
-    alert("Once analiz yapip satir olusturun.");
+    alert("Önce analiz yapıp satır oluşturun.");
     return;
   }
 
@@ -1264,7 +1878,7 @@ sendOfferBtnEl?.addEventListener("click", async () => {
     if (result.draftId) {
       offerDraftId = Number(result.draftId);
     }
-    saveStatusEl.textContent = `Teklif gonderimi tamamlandi. Grup: ${result.offerGroupId} | Toplam: ${result.total} | Gonderilen: ${result.sent} | Kuyrukta: ${result.queued} | Hatali: ${result.failed}`;
+    saveStatusEl.textContent = `Teklif gönderimi tamamlandı. Grup: ${result.offerGroupId} | Toplam: ${result.total} | Gönderilen: ${result.sent} | Kuyrukta: ${result.queued} | Hatalı: ${result.failed}`;
   } catch (err) {
     alert(err.message);
   }
@@ -1279,9 +1893,14 @@ if (offerBelgeTarihiEl && !offerBelgeTarihiEl.value) {
   offerBelgeTarihiEl.value = new Date().toISOString().slice(0, 10);
 }
 
-const urlRecordId = Number(new URLSearchParams(window.location.search).get("recordId"));
+initializeOfferMetaPanel();
+const pageParams = new URLSearchParams(window.location.search);
+setMatchedOfferLocked(pageParams.get("readonly") === "1");
+
+const urlRecordId = Number(pageParams.get("recordId"));
 if (Number.isFinite(urlRecordId) && urlRecordId > 0) {
   loadMatchedOffer(urlRecordId).catch((err) => {
-    saveStatusEl.textContent = `Kayit yuklenemedi: ${err.message}`;
+    saveStatusEl.textContent = `Kayıt yüklenemedi: ${err.message}`;
   });
 }
+

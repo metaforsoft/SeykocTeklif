@@ -60,6 +60,13 @@ export const env = {
     endpoint: process.env["ERP_OFFER_ENDPOINT"] ?? process.env["ERP_ORDER_ENDPOINT"] ?? "",
     apiKey: process.env["ERP_OFFER_API_KEY"] ?? process.env["ERP_ORDER_API_KEY"] ?? ""
   },
+  uyumLookup: {
+    baseUrl: process.env["UYUM_LOOKUP_BASE_URL"] ?? "",
+    user: process.env["UYUM_LOOKUP_USER"] ?? "",
+    password: process.env["UYUM_LOOKUP_PASSWORD"] ?? "",
+    bearerToken: process.env["UYUM_LOOKUP_BEARER_TOKEN"] ?? "",
+    secretKey: process.env["UYUM_LOOKUP_SECRET_KEY"] ?? ""
+  },
   orderDispatch: {
     intervalSeconds: Number(optional("ORDER_DISPATCH_INTERVAL_SECONDS", "15")),
     batchSize: Number(optional("ORDER_DISPATCH_BATCH_SIZE", "20")),

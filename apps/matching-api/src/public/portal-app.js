@@ -250,7 +250,7 @@ function renderOffersTable(items) {
   }
 
   const rows = items.map((item) => `
-    <tr data-offer-id="${item.id}">
+    <tr data-offer-id="${item.id}" data-offer-status="${item.status || ""}">
       <td>${item.id}</td>
       <td>${item.title}</td>
       <td>${item.sourceName || "-"}</td>
@@ -258,6 +258,7 @@ function renderOffersTable(items) {
       <td>${item.profileName || "-"}</td>
       <td>${item.lineCount}</td>
       <td>${item.createdBy || "-"}</td>
+      <td><span class="status-badge ${item.sentToErp ? "status-badge--sent" : "status-badge--draft"}">${item.sentToErp ? "ERP'ye Gonderildi" : "Bekliyor"}</span></td>
       <td>${new Date(item.createdAt).toLocaleString("tr-TR")}</td>
     </tr>
   `).join("");
@@ -274,6 +275,7 @@ function renderOffersTable(items) {
             <th>Profil</th>
             <th>Satır</th>
             <th>Kullanıcı</th>
+            <th>ERP</th>
             <th>Tarih</th>
           </tr>
         </thead>
@@ -293,7 +295,9 @@ async function renderMatchedOffers() {
     row.addEventListener("click", () => {
       const offerId = row.getAttribute("data-offer-id");
       if (!offerId) return;
-      window.open(`/ui/?recordId=${offerId}`, "_blank", "noopener");
+      const offerStatus = String(row.getAttribute("data-offer-status") || "").trim().toLowerCase();
+      const readonlyParam = offerStatus === "sent" ? "&readonly=1" : "";
+      window.open(`/ui/?recordId=${offerId}${readonlyParam}`, "_blank", "noopener");
     });
   });
 }

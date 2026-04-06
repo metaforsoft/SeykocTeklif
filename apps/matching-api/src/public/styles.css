@@ -183,6 +183,51 @@ textarea:focus, input:focus, select:focus {
   border-color: var(--primary-2);
 }
 
+.lookup-picker {
+  position: relative;
+}
+
+.lookup-picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
+  z-index: 25;
+}
+
+.lookup-picker-menu.hidden {
+  display: none;
+}
+
+.lookup-picker-item {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #eef2f7;
+  background: #fff;
+  color: var(--text);
+  text-align: left;
+  padding: 9px 10px;
+  cursor: pointer;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.9rem;
+}
+
+.lookup-picker-item:hover {
+  background: #f3f8fe;
+}
+
+.lookup-picker-empty {
+  padding: 10px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
 .row {
   display: flex;
   gap: 10px;
@@ -223,6 +268,81 @@ textarea:focus, input:focus, select:focus {
 
 .section-toggle {
   margin-top: 10px;
+}
+
+.collapsible-card {
+  margin-bottom: 12px;
+  border: 1px solid #dbe6f3;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #fbfdff, #f4f8fc);
+  overflow: visible;
+}
+
+.collapsible-toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #1d3652;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.collapsible-toggle strong {
+  display: block;
+  font-size: 0.95rem;
+}
+
+.collapsible-chevron {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid #cdd9e5;
+  background: #fff;
+  font-size: 1rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.collapsible-panel {
+  padding: 0 14px 14px;
+  border-top: 1px solid #e6edf5;
+  overflow: visible;
+}
+
+.offer-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(170px, 1fr));
+  gap: 12px;
+  padding-top: 12px;
+  overflow: visible;
+}
+
+.offer-meta-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.offer-meta-grid label > span {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #334e68;
+}
+
+.offer-meta-description {
+  grid-column: 1 / -1;
+}
+
+.offer-meta-description textarea {
+  min-height: 78px;
+  resize: vertical;
 }
 
 .btn-primary, .file-btn {
@@ -808,6 +928,9 @@ tbody tr:nth-child(even) { background: #fbfdff; }
     grid-template-columns: 1fr;
   }
   .offer-grid {
+    grid-template-columns: 1fr;
+  }
+  .offer-meta-grid {
     grid-template-columns: 1fr;
   }
 }

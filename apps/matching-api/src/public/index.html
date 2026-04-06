@@ -56,6 +56,50 @@
 
     <section class="panel">
       <h2>Eşleştirilen Satırlar</h2>
+      <div class="collapsible-card">
+        <button
+          id="offerMetaToggleBtn"
+          type="button"
+          class="collapsible-toggle"
+          aria-expanded="false"
+          aria-controls="offerMetaPanel"
+        >
+          <span>
+            <strong>Teklif Bilgileri</strong>
+          </span>
+          <span id="offerMetaChevron" class="collapsible-chevron">+</span>
+        </button>
+        <div id="offerMetaPanel" class="collapsible-panel hidden" aria-hidden="true">
+          <div class="offer-meta-grid">
+            <label>
+              <span>Teklif Tarihi</span>
+              <input id="offerMetaDate" type="date" />
+            </label>
+            <label>
+              <span>Hareket Kodu</span>
+              <select id="offerMetaMovementCode">
+                <option value="">Seçiniz</option>
+              </select>
+            </label>
+            <label>
+              <span>Cari</span>
+              <select id="offerMetaCustomer">
+                <option value="">Seçiniz</option>
+              </select>
+            </label>
+            <label>
+              <span>Müşteri Temsilcisi</span>
+              <select id="offerMetaRepresentative">
+                <option value="">Seçiniz</option>
+              </select>
+            </label>
+            <label class="offer-meta-description">
+              <span>Açıklama</span>
+              <textarea id="offerMetaDescription" rows="3" placeholder="Teklif ile ilgili notları girin..."></textarea>
+            </label>
+          </div>
+        </div>
+      </div>
       <div class="table-wrap">
         <table id="resultTable">
           <thead>
@@ -69,18 +113,20 @@
               <th>Seç</th>
               <th>Birim</th>
               <th>Kesim Var</th>
+              <th>Menşei</th>
               <th>Adet</th>
               <th>İşlem</th>
             </tr>
           </thead>
           <tbody id="resultBody">
-            <tr><td colspan="11" class="muted center">Henüz analiz yapılmadı.</td></tr>
+            <tr><td colspan="12" class="muted center">Henüz analiz yapılmadı.</td></tr>
           </tbody>
         </table>
       </div>
       <div class="row actions">
-        <button id="addRowBtn" class="btn-secondary" type="button">Yeni Satır Ekle</button>
         <button id="saveBtn" class="btn-primary">Seçimleri Kaydet</button>
+        <button id="sendMatchedOfferToErpBtn" class="btn-primary" type="button">ERP'ye Gönder</button>
+        <button id="exportTableBtn" class="btn-secondary" type="button">Excel'e Aktar</button>
       </div>
       <pre id="saveStatus" class="code-box">Bekleniyor.</pre>
     </section>
@@ -109,10 +155,10 @@
                 <th>ERP Cap</th>
                 <th>Seri</th>
                 <th>Temper</th>
-                <th>Ölçü</th>
+              <th>Ölçü</th>
                 <th>Tip</th>
                 <th>Kategori</th>
-                <th>Açıklama</th>
+              <th>Açıklama</th>
               </tr>
             </thead>
             <tbody id="allStockTableBody"></tbody>
@@ -120,7 +166,7 @@
         </div>
       </div>
       <div class="modal-actions">
-        <button id="selectStockBtn" type="button" class="btn-primary">Seç</button>
+          <button id="selectStockBtn" type="button" class="btn-primary">Seç</button>
       </div>
     </div>
   </div>

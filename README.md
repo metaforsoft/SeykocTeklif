@@ -15,6 +15,90 @@ Docker compose ile 6 servis calisir:
 
 Dosya: `docker-compose.yml`
 
+## Docker'da Lookup Testi
+
+Hareket kodu gibi lookup alanlari `matching-api` icindeki `/lookups/:lookupKey` endpoint'i uzerinden cekilir.
+Container ortam degiskenleri `.env` icinden gelir. Yeni lookup ayarlari eklenince `matching-api` image'ini rebuild edip container'i recreate etmek gerekir.
+
+Ornek `.env` anahtarlari:
+
+- `UYUM_LOOKUP_BASE_URL=http://10.0.1.16:600`
+- `UYUM_LOOKUP_USER=WEBSERVIS`
+- `UYUM_LOOKUP_PASSWORD=...`
+- `UYUM_LOOKUP_BEARER_TOKEN=...`
+- `UYUM_LOOKUP_SECRET_KEY=...`
+
+Docker uzerinden test akisi:
+
+1. `docker compose build matching-api`
+2. `docker compose up -d matching-api`
+3. `docker compose logs -f matching-api`
+4. Ayrica endpoint testi: `http://localhost:8080/lookups/movement-codes`
+
+PowerShell ile hizli dogrulama:
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8080/lookups/movement-codes" -Method Get
+```
+
+Beklenen sonuc:
+
+- `items[].value` alaninda hareket kodu doner. Ornek: `TES-101`
+- `items[].label` alaninda dropdown metni doner. Ornek: `TES-101 SATIS TEKLIF`
+
+Not:
+
+- Bu Uyum endpoint'i Basic auth ile calismiyor olabilir.
+- Loglardan gelen sonuca gore endpoint `Authorization: Bearer ...` ve `UyumSecretKey` header'larini bekliyor.
+- Bu durumda `UYUM_LOOKUP_BEARER_TOKEN` ve `UYUM_LOOKUP_SECRET_KEY` alanlarini doldurmaniz gerekir.
+
+UI testi:
+
+1. Uygulamayi acin.
+2. `Teklif Bilgileri` panelini genisletin.
+3. `Hareket Kodu` dropdown'unda API'den gelen kayitlarin listelendigini kontrol edin.
+
+## Docker Dev Modu
+
+Kod degisikligini hizli test etmek icin ayri bir dev compose dosyasi vardir:
+
+- `docker-compose.dev.yml`
+
+Bu servis:
+
+- kaynak kodu container icine bind mount eder
+- `matching-api` servisini `node --watch` ile calistirir
+- `.ts` dosyalari degistiginde container icinde sureci otomatik yeniden baslatir
+- uygulamayi `http://localhost:8081` uzerinden acar
+
+Ilk calistirma:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d matching_db ocr-service migrate matching-api-dev
+```
+
+Log izleme:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f matching-api-dev
+```
+
+Kullanim:
+
+1. `apps/matching-api/src` altinda kodu degistirin.
+2. Log ekraninda `Restarting` benzeri yeniden baslama ciktilarini bekleyin.
+3. Tarayicidan `http://localhost:8081` adresini yenileyin.
+
+Notlar:
+
+- Bu mod hizli gelistirme icindir, production benzeri degildir.
+- `package.json` veya lock dosyasi degisirse dev servisini yeniden olusturmak daha sagliklidir.
+- Sadece `.env` degisti ise su komut yeterlidir:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate matching-api-dev
+```
+
 ## Uctan Uca Akis
 
 ### 1. ERP Senkronizasyonu

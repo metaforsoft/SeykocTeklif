@@ -137,6 +137,26 @@ button {
   color: #b42318;
 }
 
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.status-badge--sent {
+  background: #e8f5e9;
+  color: #1b5e20;
+}
+
+.status-badge--draft {
+  background: #eef4fb;
+  color: #0b5cab;
+}
+
 .hidden {
   display: none !important;
 }
