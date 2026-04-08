@@ -1,4 +1,4 @@
-import path from "node:path";
+﻿import path from "node:path";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import * as XLSX from "xlsx";
@@ -9,6 +9,7 @@ import { rerankResults } from "./rerank";
 import { extractSourceDocument } from "./source-extract";
 import { recordExtractionFeedback, saveExtractionProfile } from "./extraction-learning";
 import { commitInstructionPolicy, parseMatchPolicy, planInstructionMessage } from "./instruction-policies";
+import { evaluateHardRules, MatchingRuleRecord, RuleCondition, RuleEffect } from "./rule-engine";
 import { authenticateCredentials, createSession, destroySession, ensureDefaultAdminUser, hashPassword, resolveRequestUser, shouldRedirectToLogin, isPublicPath } from "./auth";
 import { getLookupOptions, postUyumRequest } from "./uyum-lookups";
 
@@ -88,6 +89,7 @@ interface SaveMatchedOfferBody {
   warehouseCode?: string | null;
   paymentPlanCode?: string | null;
   incotermName?: string | null;
+  transportTypeCode?: string | null;
   deliveryDate?: string | null;
   description?: string | null;
   rows: MatchedOfferLineInput[];
@@ -102,6 +104,7 @@ interface SendMatchedOfferToErpBody {
   warehouseCode?: string | null;
   paymentPlanCode?: string | null;
   incotermName?: string | null;
+  transportTypeCode?: string | null;
   deliveryDate?: string | null;
   description?: string | null;
   rows: MatchedOfferLineInput[];
@@ -150,6 +153,10 @@ interface InsertOfferPayload {
     EntityCode: string;
     DocTraCode: string;
     SalesPersonCode: string;
+    TransportTypeCode?: string;
+    PaymentPlanCode?: string;
+    ShippingDate?: string;
+    DeliveryDate?: string;
     amt: number;
     curTra: number;
     curId: number;
@@ -168,6 +175,7 @@ function normalizeGuidanceText(value: string): string {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/ı/g, "i")
+    .replace(/Ä±/g, "i")
     .trim();
 }
 
@@ -180,30 +188,91 @@ function formatErpDateTime(value: string | null | undefined): string | null {
   return `${Number(day)}.${month}.${year} 00:00:00`;
 }
 
+function formatOfferDateForUyum(value: string | null | undefined): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return raw;
+  const [, year, month, day] = match;
+  return `${month}.${day}.${year}`;
+}
+
 function parseMatchGuidance(instruction: string | undefined): MatchGuidance {
   const normalized = normalizeGuidanceText(instruction ?? "");
   if (!normalized) {
     return {
       stockCodePrefix: null,
       requiredTerms: [],
+      requiredStockCodeTerms: [],
+      requiredStockNameTerms: [],
+      requiredNonEmptyFields: [],
       preferredSeries: null,
       preferredTemper: null,
-      preferredProductType: null
+      preferredProductType: null,
+      preferredDim1: null,
+      preferredDim2: null,
+      preferredDim3: null
     };
   }
 
-  const prefixMatch = normalized.match(/\b([a-z0-9._-]{2,12})\s+ile baslayan stok/);
-  const seriesMatch = normalized.match(/\b([1-9]\d{3})\s+gecen stok/);
-  const quotedTerms = [...normalized.matchAll(/["“”']([^"“”']{2,40})["“”']/g)].map((match) => match[1].trim());
+  const prefixMatch = normalized.match(/\b([a-z0-9._-]{2,12})\s+ile baslayan(?:\s+stok(?:lar|lari|larda)?)?(?:\s+(?:ara|getir|goster|esle|eşle))?\b/)
+    || normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,12})\s+ile baslayan(?:larda|lar|lari)?(?:\s+(?:ara|getir|goster|esle|eşle))?\b/i);
+  const seriesMatch = [
+    /\b([1-9]\d{3})\s+gecen stok\b/,
+    /\b([1-9]\d{3})\s+serisinde\b/,
+    /\b([1-9]\d{3})\s+serisinde\s+(?:ara|getir|goster)\b/,
+    /\b([1-9]\d{3})\s+serisine\b/,
+    /\b([1-9]\d{3})\s+serisine\s+(?:bak|gore|gÃ¶re)\b/,
+    /\b([1-9]\d{3})\s+(?:getir|ara|goster)\b/
+  ].map((pattern) => normalized.match(pattern)).find(Boolean) ?? null;
+  const temperMatch = [
+    /\btamper\s*(?:=|:)?\s*(t\d{1,4}|h\d{1,4}|o|f)\b/i,
+    /\btamperi?\s*(?:=|:)?\s*(t\d{1,4}|h\d{1,4}|o|f)\b/i,
+    /\btemper\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i,
+    /\btemperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i,
+    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+tamper\b/i,
+    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+(?:olanlar|getir|ara)\b/i
+  ].map((pattern) => normalized.match(pattern)).find(Boolean) ?? null;
+  const dim1Match = normalized.match(/\b(?:kalinlik|kalÄ±nlÄ±k)\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
+  const dim2Match = normalized.match(/\ben\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
+  const dim3Match = normalized.match(/\bboy\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
+  const stockCodeContainsMatch = normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin|olsun)(?:lerde|larda)?\b/i)
+    || normalized.match(/\b([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin)(?:lerde|larda)?\s+stok\s*kod(?:u|unda)?\b/i);
+  const stockNameContainsMatch = normalized.match(/\bstok\s*ad(?:i|ı|inda|ında)?\s+(.+?)\s+(?:gecen|geçen|gecsin|geçsin|olsun)(?:lerde|larda)?\b/i)
+    || normalized.match(/\b(.+?)\s+(?:gecen|geçen|gecsin|geçsin)(?:lerde|larda)?\s+stok\s*ad(?:i|ı|inda|ında)?\b/i);
+  const stockCodeActionMatch = normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,30})\s+(?:gecsin|geçsin|olsun)\b/i);
+  const stockNameActionMatch = normalized.match(/\bstok\s*ad(?:i|ı|inda|ında)?\s+(.+?)\s+(?:gecsin|geçsin|olsun)\b/i);
+  const quotedTerms = [...normalized.matchAll(/["â€œâ€']([^"â€œâ€']{2,40})["â€œâ€']/g)].map((match) => match[1].trim());
   const genericTerms = [...normalized.matchAll(/\b([a-z0-9._-]{2,20})\s+gecen stok/g)].map((match) => match[1].trim());
   const requiredTerms = [...new Set([...quotedTerms, ...genericTerms].filter(Boolean))];
+  const requiredStockCodeTerms = (stockCodeContainsMatch?.[1] || stockCodeActionMatch?.[1])
+    ? [String(stockCodeContainsMatch?.[1] || stockCodeActionMatch?.[1]).trim().toUpperCase()]
+    : [];
+  const requiredStockNameTerms = (stockNameContainsMatch?.[1] || stockNameActionMatch?.[1])
+    ? String(stockNameContainsMatch?.[1] || stockNameActionMatch?.[1]).trim().split(/\s+/).filter((term) => term.length >= 2)
+    : [];
+  const requiredNonEmptyFields = [
+    /\btamper\s+bos\s+olamaz\b/i.test(normalized) || /\btemper\s+bos\s+olamaz\b/i.test(normalized) ? "temper" : null,
+    /\balasim\s+bos\s+olamaz\b/i.test(normalized) || /\balaÅŸim\s+bos\s+olamaz\b/i.test(normalized) ? "alasim" : null,
+    /\bstok\s*kodu\s+bos\s+olamaz\b/i.test(normalized) ? "stock_code" : null,
+    /\bstok\s*adi\s+bos\s+olamaz\b/i.test(normalized) || /\bstok\s*adÄ±\s+bos\s+olamaz\b/i.test(normalized) ? "stock_name" : null,
+    /\bkalinlik\s+bos\s+olamaz\b/i.test(normalized) || /\bkalÄ±nlÄ±k\s+bos\s+olamaz\b/i.test(normalized) ? "dim1" : null,
+    /\ben\s+bos\s+olamaz\b/i.test(normalized) ? "dim2" : null,
+    /\bboy\s+bos\s+olamaz\b/i.test(normalized) ? "dim3" : null
+  ].filter((value): value is string => Boolean(value));
 
   return {
     stockCodePrefix: prefixMatch?.[1]?.toUpperCase() ?? null,
     requiredTerms,
+    requiredStockCodeTerms,
+    requiredStockNameTerms,
+    requiredNonEmptyFields,
     preferredSeries: seriesMatch?.[1] ?? null,
-    preferredTemper: null,
-    preferredProductType: null
+    preferredTemper: temperMatch?.[1]?.toUpperCase() ?? null,
+    preferredProductType: null,
+    preferredDim1: dim1Match ? Number(dim1Match[1].replace(',', '.')) : null,
+    preferredDim2: dim2Match ? Number(dim2Match[1].replace(',', '.')) : null,
+    preferredDim3: dim3Match ? Number(dim3Match[1].replace(',', '.')) : null
   };
 }
 
@@ -212,9 +281,15 @@ function buildGuidance(instruction: string | undefined, policy: MatchPolicy | nu
   return {
     stockCodePrefix: policy?.stockCodePrefix ?? parsed.stockCodePrefix ?? null,
     requiredTerms: [...new Set([...(policy?.requiredTerms ?? []), ...(parsed.requiredTerms ?? [])])],
+    requiredStockCodeTerms: [...new Set([...(policy?.requiredStockCodeTerms ?? []), ...(parsed.requiredStockCodeTerms ?? [])])],
+    requiredStockNameTerms: [...new Set([...(policy?.requiredStockNameTerms ?? []), ...(parsed.requiredStockNameTerms ?? [])])],
+    requiredNonEmptyFields: [...new Set([...(policy?.requiredNonEmptyFields ?? []), ...(parsed.requiredNonEmptyFields ?? [])])],
     preferredSeries: policy?.preferredSeries ?? parsed.preferredSeries ?? null,
     preferredTemper: policy?.preferredTemper ?? parsed.preferredTemper ?? null,
-    preferredProductType: policy?.preferredProductType ?? parsed.preferredProductType ?? null
+    preferredProductType: policy?.preferredProductType ?? parsed.preferredProductType ?? null,
+    preferredDim1: policy?.preferredDim1 ?? parsed.preferredDim1 ?? null,
+    preferredDim2: policy?.preferredDim2 ?? parsed.preferredDim2 ?? null,
+    preferredDim3: policy?.preferredDim3 ?? parsed.preferredDim3 ?? null
   };
 }
 
@@ -249,7 +324,16 @@ function applyLearningBoost(results: ScoredResult[], boostMap: Map<number, numbe
     return {
       ...r,
       score: Number((r.score + boost).toFixed(3)),
-      why: [...r.why, `ogrenilen tercih +${boost.toFixed(2)}`]
+      why: [...r.why, `ogrenilen tercih +${boost.toFixed(2)}`],
+      score_breakdown: r.score_breakdown
+        ? {
+          ...r.score_breakdown,
+          components: {
+            ...r.score_breakdown.components,
+            learning: r.score_breakdown.components.learning + boost
+          }
+        }
+        : r.score_breakdown
     };
   });
 
@@ -258,6 +342,9 @@ function applyLearningBoost(results: ScoredResult[], boostMap: Map<number, numbe
 
 function applyGuidanceFilters(candidates: CandidateRow[], guidance: MatchGuidance): CandidateRow[] {
   const requiredTerms = guidance.requiredTerms ?? [];
+  const requiredStockCodeTerms = guidance.requiredStockCodeTerms ?? [];
+  const requiredStockNameTerms = guidance.requiredStockNameTerms ?? [];
+  const requiredNonEmptyFields = guidance.requiredNonEmptyFields ?? [];
   return candidates.filter((candidate) => {
     if (guidance.stockCodePrefix) {
       const stockCode = (candidate.stock_code ?? "").toUpperCase();
@@ -269,6 +356,38 @@ function applyGuidanceFilters(candidates: CandidateRow[], guidance: MatchGuidanc
     if (requiredTerms.length > 0) {
       const haystack = `${candidate.stock_code ?? ""} ${candidate.stock_name ?? ""}`.toLocaleLowerCase("tr-TR");
       if (!requiredTerms.every((term) => haystack.includes(term.toLocaleLowerCase("tr-TR")))) {
+        return false;
+      }
+    }
+
+    if (requiredStockCodeTerms.length > 0) {
+      const stockCode = (candidate.stock_code ?? "").toLocaleUpperCase("tr-TR");
+      if (!requiredStockCodeTerms.every((term) => stockCode.includes(term.toLocaleUpperCase("tr-TR")))) {
+        return false;
+      }
+    }
+
+    if (requiredStockNameTerms.length > 0) {
+      const stockName = (candidate.stock_name ?? "").toLocaleLowerCase("tr-TR");
+      if (!requiredStockNameTerms.every((term) => stockName.includes(term.toLocaleLowerCase("tr-TR")))) {
+        return false;
+      }
+    }
+
+    if (requiredNonEmptyFields.length > 0) {
+      const fieldChecks: Record<string, string | number | null | undefined> = {
+        temper: candidate.temper ?? candidate.tamper,
+        alasim: candidate.alasim ?? candidate.series,
+        stock_code: candidate.stock_code,
+        stock_name: candidate.stock_name,
+        dim1: candidate.dim1 ?? candidate.erp_cap,
+        dim2: candidate.dim2 ?? candidate.erp_en,
+        dim3: candidate.dim3 ?? candidate.erp_boy
+      };
+      if (!requiredNonEmptyFields.every((field) => {
+        const value = fieldChecks[field];
+        return value !== null && value !== undefined && String(value).trim() !== "";
+      })) {
         return false;
       }
     }
@@ -291,13 +410,47 @@ function applyGuidanceFilters(candidates: CandidateRow[], guidance: MatchGuidanc
       }
     }
 
+    if (guidance.preferredDim1 != null) {
+      const dim1 = Number(candidate.dim1 ?? candidate.erp_cap);
+      if (Number.isFinite(dim1) && Math.abs(dim1 - Number(guidance.preferredDim1)) > 0.001) {
+        return false;
+      }
+    }
+
+    if (guidance.preferredDim2 != null) {
+      const dim2 = Number(candidate.dim2 ?? candidate.erp_en);
+      if (Number.isFinite(dim2) && Math.abs(dim2 - Number(guidance.preferredDim2)) > 0.001) {
+        return false;
+      }
+    }
+
+    if (guidance.preferredDim3 != null) {
+      const dim3 = Number(candidate.dim3 ?? candidate.erp_boy);
+      if (Number.isFinite(dim3) && Math.abs(dim3 - Number(guidance.preferredDim3)) > 0.001) {
+        return false;
+      }
+    }
+
     return true;
   });
 }
 
 function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[], guidance: MatchGuidance): ScoredResult[] {
   const requiredTerms = guidance.requiredTerms ?? [];
-  if (!guidance.stockCodePrefix && requiredTerms.length === 0 && !guidance.preferredSeries && !guidance.preferredTemper && !guidance.preferredProductType) {
+  const requiredStockCodeTerms = guidance.requiredStockCodeTerms ?? [];
+  const requiredStockNameTerms = guidance.requiredStockNameTerms ?? [];
+  const requiredNonEmptyFields = guidance.requiredNonEmptyFields ?? [];
+  if (!guidance.stockCodePrefix
+    && requiredTerms.length === 0
+    && requiredStockCodeTerms.length === 0
+    && requiredStockNameTerms.length === 0
+    && requiredNonEmptyFields.length === 0
+    && !guidance.preferredSeries
+    && !guidance.preferredTemper
+    && !guidance.preferredProductType
+    && guidance.preferredDim1 == null
+    && guidance.preferredDim2 == null
+    && guidance.preferredDim3 == null) {
     return results;
   }
 
@@ -312,11 +465,17 @@ function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[],
     if (guidance.stockCodePrefix && (candidate.stock_code ?? "").toUpperCase().startsWith(guidance.stockCodePrefix)) {
       score += 18;
       why.push(`instruction prefix ${guidance.stockCodePrefix}`);
+      if (result.score_breakdown) {
+        result.score_breakdown.components.instruction += 18;
+      }
     }
 
     if (guidance.preferredSeries && candidate.series === guidance.preferredSeries) {
       score += 16;
       why.push(`instruction series ${guidance.preferredSeries}`);
+      if (result.score_breakdown) {
+        result.score_breakdown.components.instruction += 16;
+      }
     }
 
     if (guidance.preferredTemper) {
@@ -324,6 +483,9 @@ function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[],
       if (temper === guidance.preferredTemper) {
         score += 14;
         why.push(`instruction temper ${guidance.preferredTemper}`);
+        if (result.score_breakdown) {
+          result.score_breakdown.components.instruction += 14;
+        }
       }
     }
 
@@ -332,6 +494,35 @@ function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[],
       if (productType === guidance.preferredProductType) {
         score += 12;
         why.push(`instruction type ${guidance.preferredProductType}`);
+        if (result.score_breakdown) {
+          result.score_breakdown.components.instruction += 12;
+        }
+      }
+    }
+
+    if (requiredStockCodeTerms.length > 0) {
+      const stockCode = (candidate.stock_code ?? "").toLocaleUpperCase("tr-TR");
+      const matchedCodeTerms = requiredStockCodeTerms.filter((term) => stockCode.includes(term.toLocaleUpperCase("tr-TR")));
+      if (matchedCodeTerms.length > 0) {
+        const delta = matchedCodeTerms.length * 12;
+        score += delta;
+        why.push(`instruction stock code ${matchedCodeTerms.join(", ")}`);
+        if (result.score_breakdown) {
+          result.score_breakdown.components.instruction += delta;
+        }
+      }
+    }
+
+    if (requiredStockNameTerms.length > 0) {
+      const stockName = (candidate.stock_name ?? "").toLocaleLowerCase("tr-TR");
+      const matchedNameTerms = requiredStockNameTerms.filter((term) => stockName.includes(term.toLocaleLowerCase("tr-TR")));
+      if (matchedNameTerms.length > 0) {
+        const delta = matchedNameTerms.length * 8;
+        score += delta;
+        why.push(`instruction stock name ${matchedNameTerms.join(", ")}`);
+        if (result.score_breakdown) {
+          result.score_breakdown.components.instruction += delta;
+        }
       }
     }
 
@@ -339,8 +530,45 @@ function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[],
       const haystack = `${candidate.stock_code ?? ""} ${candidate.stock_name ?? ""}`.toLocaleLowerCase("tr-TR");
       const matchedTerms = requiredTerms.filter((term) => haystack.includes(term.toLocaleLowerCase("tr-TR")));
       if (matchedTerms.length > 0) {
-        score += matchedTerms.length * 10;
+        const delta = matchedTerms.length * 10;
+        score += delta;
         why.push(`instruction terms ${matchedTerms.join(", ")}`);
+        if (result.score_breakdown) {
+          result.score_breakdown.components.instruction += delta;
+        }
+      }
+    }
+
+    if (guidance.preferredDim1 != null) {
+      const dim1 = Number(candidate.dim1 ?? candidate.erp_cap);
+      if (Number.isFinite(dim1) && Math.abs(dim1 - Number(guidance.preferredDim1)) <= 0.001) {
+        score += 14;
+        why.push(`instruction kalinlik ${guidance.preferredDim1}`);
+        if (result.score_breakdown) {
+          result.score_breakdown.components.instruction += 14;
+        }
+      }
+    }
+
+    if (guidance.preferredDim2 != null) {
+      const dim2 = Number(candidate.dim2 ?? candidate.erp_en);
+      if (Number.isFinite(dim2) && Math.abs(dim2 - Number(guidance.preferredDim2)) <= 0.001) {
+        score += 12;
+        why.push(`instruction en ${guidance.preferredDim2}`);
+        if (result.score_breakdown) {
+          result.score_breakdown.components.instruction += 12;
+        }
+      }
+    }
+
+    if (guidance.preferredDim3 != null) {
+      const dim3 = Number(candidate.dim3 ?? candidate.erp_boy);
+      if (Number.isFinite(dim3) && Math.abs(dim3 - Number(guidance.preferredDim3)) <= 0.001) {
+        score += 12;
+        why.push(`instruction boy ${guidance.preferredDim3}`);
+        if (result.score_breakdown) {
+          result.score_breakdown.components.instruction += 12;
+        }
       }
     }
 
@@ -350,6 +578,196 @@ function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[],
       why
     };
   }).sort((a, b) => b.score - a.score);
+}
+
+async function loadActiveHardRules(): Promise<MatchingRuleRecord[]> {
+  const res = await matchPool.query<{
+    id: string;
+    rule_set_id: string;
+    rule_set_name: string;
+    priority: string;
+    rule_type: "hard_filter" | "soft_boost";
+    target_level: "input" | "candidate" | "pair";
+    condition_json: RuleCondition;
+    effect_json: RuleEffect;
+    stop_on_match: boolean;
+    description: string | null;
+  }>(
+    `SELECT
+       mr.id::text,
+       mr.rule_set_id::text,
+       mrs.name AS rule_set_name,
+       mrs.priority::text,
+       mr.rule_type,
+       mr.target_level,
+       mr.condition_json,
+       mr.effect_json,
+       mr.stop_on_match,
+       mr.description
+     FROM matching_rules mr
+     JOIN matching_rule_sets mrs ON mrs.id = mr.rule_set_id
+     WHERE mr.active = TRUE
+       AND mrs.active = TRUE
+       AND mr.rule_type = 'hard_filter'
+     ORDER BY mrs.priority ASC, mr.id ASC`
+  );
+
+  return res.rows.map((row) => ({
+    id: Number(row.id),
+    rule_set_id: Number(row.rule_set_id),
+    rule_set_name: row.rule_set_name,
+    priority: Number(row.priority),
+    rule_type: row.rule_type,
+    target_level: row.target_level,
+    condition_json: row.condition_json,
+    effect_json: row.effect_json,
+    stop_on_match: row.stop_on_match,
+    description: row.description
+  }));
+}
+
+async function loadAllRules(): Promise<Array<MatchingRuleRecord & { active: boolean }>> {
+  const res = await matchPool.query<{
+    id: string;
+    rule_set_id: string;
+    rule_set_name: string;
+    priority: string;
+    rule_type: "hard_filter" | "soft_boost";
+    target_level: "input" | "candidate" | "pair";
+    condition_json: RuleCondition;
+    effect_json: RuleEffect;
+    stop_on_match: boolean;
+    description: string | null;
+    active: boolean;
+  }>(
+    `SELECT
+       mr.id::text,
+       mr.rule_set_id::text,
+       mrs.name AS rule_set_name,
+       mrs.priority::text,
+       mr.rule_type,
+       mr.target_level,
+       mr.condition_json,
+       mr.effect_json,
+       mr.stop_on_match,
+       mr.description,
+       mr.active
+     FROM matching_rules mr
+     JOIN matching_rule_sets mrs ON mrs.id = mr.rule_set_id
+     ORDER BY mrs.priority ASC, mr.id ASC`
+  );
+
+  return res.rows.map((row) => ({
+    id: Number(row.id),
+    rule_set_id: Number(row.rule_set_id),
+    rule_set_name: row.rule_set_name,
+    priority: Number(row.priority),
+    rule_type: row.rule_type,
+    target_level: row.target_level,
+    condition_json: row.condition_json,
+    effect_json: row.effect_json,
+    stop_on_match: row.stop_on_match,
+    description: row.description,
+    active: row.active
+  }));
+}
+
+async function loadInstructionPolicies(): Promise<Array<{
+  id: number;
+  name: string;
+  source_type: string;
+  policy_json: InstructionPolicyPayload;
+  use_count: number;
+  success_count: number;
+  failure_count: number;
+  active: boolean;
+  created_at: Date;
+  updated_at: Date;
+}>> {
+  const res = await matchPool.query<{
+    id: string;
+    name: string;
+    source_type: string;
+    policy_json: string;
+    use_count: string;
+    success_count: string;
+    failure_count: string;
+    active: boolean;
+    created_at: Date;
+    updated_at: Date;
+  }>(
+    `SELECT
+       id::text,
+       name,
+       source_type,
+       policy_json::text,
+       use_count::text,
+       success_count::text,
+       failure_count::text,
+       active,
+       created_at,
+       updated_at
+     FROM instruction_policies
+     ORDER BY active DESC, success_count DESC, use_count DESC, id DESC`
+  );
+
+  return res.rows.map((row) => ({
+    id: Number(row.id),
+    name: row.name,
+    source_type: row.source_type,
+    policy_json: JSON.parse(row.policy_json) as InstructionPolicyPayload,
+    use_count: Number(row.use_count),
+    success_count: Number(row.success_count),
+    failure_count: Number(row.failure_count),
+    active: row.active,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  }));
+}
+
+async function loadCandidateRowsByStockIds(stockIds: number[]): Promise<CandidateRow[]> {
+  if (stockIds.length === 0) return [];
+  const sqlProductTypeExpr = "COALESCE(NULLIF(sm.cinsi, ''), sf.product_type)";
+  const sqlSeriesExpr = "NULLIF(sm.alasim, '')";
+  const sqlSeriesGroupExpr = `COALESCE(
+    CASE
+      WHEN NULLIF(sm.alasim, '') ~ '^[1-9][0-9]{3}$'
+      THEN SUBSTRING(NULLIF(sm.alasim, '') FROM 1 FOR 1) || '000'
+      ELSE NULL
+    END
+  )`;
+  const sqlTemperExpr = "COALESCE(NULLIF(sm.tamper, ''), sf.temper)";
+
+  const res = await matchPool.query<CandidateRow>(
+    `SELECT
+       sm.stock_id,
+       sm.stock_code,
+       sm.stock_name,
+       sm.birim,
+       NULLIF(sm.erp_cap, 0)::float8 AS erp_cap,
+       NULLIF(sm.erp_en, 0)::float8 AS erp_en,
+       NULLIF(sm.erp_boy, 0)::float8 AS erp_boy,
+       NULLIF(sm.erp_yukseklik, 0)::float8 AS erp_yukseklik,
+       sm.alasim,
+       sm.cinsi,
+       sm.specific_gravity::float8 AS specific_gravity,
+       ${sqlTemperExpr} AS tamper,
+       ${sqlProductTypeExpr} AS product_type,
+       ${sqlSeriesExpr} AS series,
+       ${sqlSeriesGroupExpr} AS series_group,
+       ${sqlTemperExpr} AS temper,
+       sf.dim_text,
+       sf.dim1::float8 AS dim1,
+       sf.dim2::float8 AS dim2,
+       sf.dim3::float8 AS dim3,
+       0::float8 AS similarity
+     FROM stock_master sm
+     JOIN stock_features sf ON sf.stock_id = sm.stock_id
+     WHERE sm.stock_id = ANY($1::int[])
+     ORDER BY sm.stock_id ASC`,
+    [stockIds]
+  );
+  return res.rows;
 }
 
 const requiredOfferHeaderFields: Array<keyof OfferHeaderInput> = [
@@ -437,6 +855,10 @@ function validateMatchedOfferErpInput(body: SendMatchedOfferToErpBody | undefine
 
 async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise<InsertOfferPayload> {
   const rows = Array.isArray(body.rows) ? body.rows : [];
+  const transportTypeCode = String(body.transportTypeCode ?? body.incotermName ?? "").trim() || null;
+  const paymentPlanCode = String(body.paymentPlanCode ?? "").trim() || null;
+  const shippingDate = formatOfferDateForUyum(body.deliveryDate ?? null);
+  const deliveryDate = formatOfferDateForUyum(body.deliveryDate ?? null);
   const stockIds = [...new Set(rows.map((row) => normalizePositiveInteger(row.selected_stock_id)).filter((value): value is number => Boolean(value)))];
   const stockRes = await matchPool.query<{ stock_id: number; stock_code: string | null }>(
     `SELECT stock_id, stock_code
@@ -455,7 +877,7 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
     const stockId = normalizePositiveInteger(row.selected_stock_id) as number;
     const quantity = normalizePositiveInteger(row.quantity) as number;
     const stockCode = stockCodeMap.get(stockId);
-    const mensei = String(row.mensei ?? "").trim().toLocaleUpperCase("tr-TR") || "İTHAL";
+    const mensei = String(row.mensei ?? "").trim().toLocaleUpperCase("tr-TR") || "Ä°THAL";
     if (!stockCode) {
       throw new Error(`Satir ${index + 1}: ERP stok kodu bulunamadi`);
     }
@@ -486,6 +908,10 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
       EntityCode: String(body.customerCode ?? "").trim(),
       DocTraCode: String(body.movementCode ?? "").trim(),
       SalesPersonCode: String(body.representativeCode ?? "").trim(),
+      TransportTypeCode: transportTypeCode ?? undefined,
+      PaymentPlanCode: paymentPlanCode ?? undefined,
+      ShippingDate: shippingDate ?? undefined,
+      DeliveryDate: deliveryDate ?? undefined,
       amt: details.reduce((sum, item) => sum + item.amt, 0),
       curTra: 2220,
       curId: 114,
@@ -525,7 +951,7 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
     const representativeCode = String(body.representativeCode ?? "").trim() || null;
     const warehouseCode = String(body.warehouseCode ?? "").trim() || null;
     const paymentPlanCode = String(body.paymentPlanCode ?? "").trim() || null;
-    const incotermName = String(body.incotermName ?? "").trim() || null;
+    const incotermName = String(body.transportTypeCode ?? body.incotermName ?? "").trim() || null;
     const deliveryDate = String(body.deliveryDate ?? "").trim() || null;
     const description = String(body.description ?? "").trim() || null;
     let offerId = Number(body.offerId);
@@ -1012,6 +1438,7 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
       warehouseCode: offer.warehouse_code,
       paymentPlanCode: offer.payment_plan_code,
       incotermName: offer.incoterm_name,
+      transportTypeCode: offer.incoterm_name,
       deliveryDate: offer.delivery_date,
       description: offer.description,
       status: offer.status,
@@ -1120,19 +1547,19 @@ app.post<{ Body: SendMatchedOfferToErpBody }>("/matched-offers/send-erp", async 
 app.post<{ Body: { rows?: ExportMatchedTableRowInput[] } }>("/exports/matched-table", async (request, reply) => {
   const rows = Array.isArray(request.body?.rows) ? request.body.rows : [];
   if (rows.length === 0) {
-    return reply.code(400).send({ error: "Aktarılacak satır bulunamadı" });
+    return reply.code(400).send({ error: "AktarÄ±lacak satÄ±r bulunamadÄ±" });
   }
 
   const exportRows = rows.map((row, index) => ({
-    "Sıra": Number.isFinite(Number(row.sira)) ? Number(row.sira) : index + 1,
-    "Kalınlık": row.kalinlik ?? "",
+    "SÄ±ra": Number.isFinite(Number(row.sira)) ? Number(row.sira) : index + 1,
+    "KalÄ±nlÄ±k": row.kalinlik ?? "",
     "En": row.en ?? "",
     "Boy": row.boy ?? "",
     "Stok Kodu": String(row.stokKodu ?? "").trim(),
-    "Stok Adı": String(row.stokAdi ?? "").trim(),
+    "Stok AdÄ±": String(row.stokAdi ?? "").trim(),
     "Birim": String(row.birim ?? "").trim(),
     "Kesim Durumu": String(row.kesimDurumu ?? "").trim(),
-    "Menşei": String(row.mensei ?? "").trim(),
+    "MenÅŸei": String(row.mensei ?? "").trim(),
     "Adet": row.adet ?? ""
   }));
 
@@ -1207,6 +1634,328 @@ app.get("/stocks", async () => {
       cinsi: row.cinsi,
       alasim: row.alasim,
       tamper: row.tamper
+    }))
+  };
+});
+
+app.get("/matching-rules", async () => {
+  const items = await loadAllRules();
+  return { items };
+});
+
+app.get("/instruction-policies", async () => {
+  const items = await loadInstructionPolicies();
+  return { items };
+});
+
+app.post<{
+  Body: {
+    ruleSetName?: string;
+    scopeType?: string;
+    scopeValue?: string | null;
+    priority?: number;
+    ruleType?: "hard_filter" | "soft_boost";
+    targetLevel?: "input" | "candidate" | "pair";
+    conditionJson?: RuleCondition;
+    effectJson?: RuleEffect;
+    stopOnMatch?: boolean;
+    active?: boolean;
+    description?: string | null;
+    createdBy?: string | null;
+  };
+}>("/matching-rules", async (request, reply) => {
+  const ruleSetName = String(request.body?.ruleSetName ?? (request.body as { rule_set_name?: string } | undefined)?.rule_set_name ?? "").trim();
+  const scopeType = String(request.body?.scopeType ?? (request.body as { scope_type?: string } | undefined)?.scope_type ?? "global").trim() || "global";
+  const scopeValue = String(request.body?.scopeValue ?? (request.body as { scope_value?: string | null } | undefined)?.scope_value ?? "").trim() || null;
+  const priority = Number(request.body?.priority ?? 100);
+  const ruleType = request.body?.ruleType ?? (request.body as { rule_type?: "hard_filter" | "soft_boost" } | undefined)?.rule_type ?? "hard_filter";
+  const targetLevel = request.body?.targetLevel ?? (request.body as { target_level?: "input" | "candidate" | "pair" } | undefined)?.target_level ?? "pair";
+  const conditionJson = request.body?.conditionJson ?? (request.body as { condition_json?: RuleCondition } | undefined)?.condition_json;
+  const effectJson = request.body?.effectJson ?? (request.body as { effect_json?: RuleEffect } | undefined)?.effect_json;
+  const stopOnMatch = request.body?.stopOnMatch === true || (request.body as { stop_on_match?: boolean } | undefined)?.stop_on_match === true;
+  const active = request.body?.active !== false && (request.body as { is_active?: boolean } | undefined)?.is_active !== false;
+  const description = String(request.body?.description ?? "").trim() || null;
+  const createdBy = String(request.body?.createdBy ?? "").trim() || null;
+
+  if (!ruleSetName || !conditionJson || !effectJson) {
+    return reply.code(400).send({ error: "ruleSetName, conditionJson ve effectJson gerekli" });
+  }
+
+  const client = await matchPool.connect();
+  try {
+    await client.query("BEGIN");
+    const ruleSetInsert = await client.query<{ id: string }>(
+      `INSERT INTO matching_rule_sets(name, scope_type, scope_value, priority, active, created_by)
+       VALUES($1,$2,$3,$4,$5,$6)
+       RETURNING id::text`,
+      [ruleSetName, scopeType, scopeValue, priority, active, createdBy]
+    );
+    const ruleSetId = Number(ruleSetInsert.rows[0].id);
+    const ruleInsert = await client.query<{ id: string }>(
+      `INSERT INTO matching_rules(
+         rule_set_id, rule_type, target_level, condition_json, effect_json, stop_on_match, active, description
+       ) VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8)
+       RETURNING id::text`,
+      [ruleSetId, ruleType, targetLevel, JSON.stringify(conditionJson), JSON.stringify(effectJson), stopOnMatch, active, description]
+    );
+    await client.query("COMMIT");
+    return { ok: true, ruleSetId, ruleId: Number(ruleInsert.rows[0].id) };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.put<{
+  Params: { id: string };
+  Body: {
+    active?: boolean;
+    conditionJson?: RuleCondition;
+    effectJson?: RuleEffect;
+    stopOnMatch?: boolean;
+    description?: string | null;
+    priority?: number;
+  };
+}>("/matching-rules/:id", async (request, reply) => {
+  const ruleId = Number(request.params.id);
+  if (!Number.isFinite(ruleId) || ruleId <= 0) {
+    return reply.code(400).send({ error: "gecersiz rule id" });
+  }
+
+  const existing = await matchPool.query<{ rule_set_id: string }>(
+    "SELECT rule_set_id::text FROM matching_rules WHERE id = $1",
+    [ruleId]
+  );
+  if (existing.rowCount === 0) {
+    return reply.code(404).send({ error: "rule not found" });
+  }
+
+  const updates: string[] = [];
+  const params: unknown[] = [ruleId];
+  let idx = 2;
+
+  const body = request.body as {
+    active?: boolean;
+    is_active?: boolean;
+    conditionJson?: RuleCondition;
+    condition_json?: RuleCondition;
+    effectJson?: RuleEffect;
+    effect_json?: RuleEffect;
+    stopOnMatch?: boolean;
+    stop_on_match?: boolean;
+    description?: string | null;
+    priority?: number;
+  } | undefined;
+
+  if (body?.conditionJson || body?.condition_json) {
+    updates.push(`condition_json = $${idx}::jsonb`);
+    params.push(JSON.stringify(body.conditionJson ?? body.condition_json));
+    idx += 1;
+  }
+  if (body?.effectJson || body?.effect_json) {
+    updates.push(`effect_json = $${idx}::jsonb`);
+    params.push(JSON.stringify(body.effectJson ?? body.effect_json));
+    idx += 1;
+  }
+  if (typeof body?.stopOnMatch === "boolean" || typeof body?.stop_on_match === "boolean") {
+    updates.push(`stop_on_match = $${idx}`);
+    params.push(body.stopOnMatch ?? body.stop_on_match);
+    idx += 1;
+  }
+  if (typeof body?.active === "boolean" || typeof body?.is_active === "boolean") {
+    updates.push(`active = $${idx}`);
+    params.push(body.active ?? body.is_active);
+    idx += 1;
+  }
+  if (body?.description !== undefined) {
+    updates.push(`description = $${idx}`);
+    params.push(String(body.description ?? "").trim() || null);
+    idx += 1;
+  }
+
+  if (updates.length > 0) {
+    updates.push("updated_at = NOW()");
+    await matchPool.query(
+      `UPDATE matching_rules SET ${updates.join(", ")} WHERE id = $1`,
+      params
+    );
+  }
+
+  if (body?.priority !== undefined) {
+    await matchPool.query(
+      `UPDATE matching_rule_sets
+       SET priority = $2, updated_at = NOW()
+       WHERE id = $1`,
+      [Number(existing.rows[0].rule_set_id), Number(body.priority)]
+    );
+  }
+
+  return { ok: true };
+});
+
+app.put<{
+  Params: { id: string };
+  Body: {
+    active?: boolean;
+    name?: string;
+  };
+}>("/instruction-policies/:id", async (request, reply) => {
+  const policyId = Number(request.params.id);
+  if (!Number.isFinite(policyId) || policyId <= 0) {
+    return reply.code(400).send({ error: "gecersiz policy id" });
+  }
+
+  const updates: string[] = [];
+  const params: unknown[] = [policyId];
+  let idx = 2;
+
+  if (typeof request.body?.active === "boolean") {
+    updates.push(`active = $${idx}`);
+    params.push(request.body.active);
+    idx += 1;
+  }
+  if (request.body?.name !== undefined) {
+    updates.push(`name = $${idx}`);
+    params.push(String(request.body.name ?? "").trim() || "manual-policy");
+    idx += 1;
+  }
+
+  if (updates.length === 0) {
+    return { ok: true };
+  }
+
+  updates.push("updated_at = NOW()");
+  const result = await matchPool.query(
+    `UPDATE instruction_policies
+     SET ${updates.join(", ")}
+     WHERE id = $1`,
+    params
+  );
+
+  if ((result.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "policy not found" });
+  }
+
+  return { ok: true };
+});
+
+app.post<{
+  Body: {
+    text?: string;
+    ruleIds?: number[];
+    candidateStockIds?: number[];
+  };
+}>("/matching-rules/test", async (request, reply) => {
+  const text = String(request.body?.text ?? (request.body as { inputText?: string } | undefined)?.inputText ?? "").trim();
+  const ruleIds = Array.isArray(request.body?.ruleIds)
+    ? request.body.ruleIds.map((item) => Number(item)).filter((item) => Number.isFinite(item) && item > 0)
+    : [];
+  const candidateStockIds = Array.isArray(request.body?.candidateStockIds)
+    ? request.body.candidateStockIds.map((item) => Number(item)).filter((item) => Number.isFinite(item) && item > 0)
+    : [];
+
+  if (!text || candidateStockIds.length === 0) {
+    return reply.code(400).send({ error: "text ve candidateStockIds gerekli" });
+  }
+
+  const extracted = extractFeaturesFromInput(text);
+  const candidates = await loadCandidateRowsByStockIds(candidateStockIds);
+  if (candidates.length === 0) {
+    return { ok: true, extracted, beforeCount: 0, afterCount: 0, audits: [], items: [] };
+  }
+
+  const activeRules = await loadActiveHardRules();
+  const rules = ruleIds.length > 0 ? activeRules.filter((rule) => ruleIds.includes(rule.id)) : activeRules;
+  const evaluation = evaluateHardRules(extracted, candidates, rules);
+
+  return {
+    ok: true,
+    extracted,
+    beforeCount: candidates.length,
+    afterCount: evaluation.candidates.length,
+    audits: evaluation.audits,
+    items: evaluation.candidates.map((candidate) => ({
+      stock_id: candidate.stock_id,
+      stock_code: candidate.stock_code,
+      stock_name: candidate.stock_name,
+      rule_hits: evaluation.candidateRuleHits.get(Number(candidate.stock_id)) ?? []
+    }))
+  };
+});
+
+app.get<{ Querystring: { limit?: string } }>("/matching-rules/audit-recent", async (request) => {
+  const limit = Math.max(1, Math.min(50, Number(request.query?.limit ?? 12)));
+  const res = await matchPool.query<{
+    id: string;
+    created_at: Date;
+    input_text: string;
+    selected_stock_id: number | null;
+    stock_code: string | null;
+    stock_name: string | null;
+    rule_summary_json: string | null;
+  }>(
+    `SELECT
+       mh.id::text,
+       mh.created_at,
+       mh.input_text,
+       mh.selected_stock_id,
+       sm.stock_code,
+       sm.stock_name,
+       mh.rule_summary_json::text
+     FROM match_history mh
+     LEFT JOIN stock_master sm ON sm.stock_id = mh.selected_stock_id
+     WHERE mh.rule_summary_json IS NOT NULL
+     ORDER BY mh.id DESC
+     LIMIT $1`,
+    [limit]
+  );
+
+  return {
+    items: res.rows.map((row) => ({
+      id: Number(row.id),
+      created_at: row.created_at,
+      input_text: row.input_text,
+      selected_stock_id: row.selected_stock_id !== null ? Number(row.selected_stock_id) : null,
+      stock_code: row.stock_code ?? null,
+      stock_name: row.stock_name ?? null,
+      rule_summary_json: row.rule_summary_json ? JSON.parse(row.rule_summary_json) : null
+    }))
+  };
+});
+
+app.get<{ Params: { matchHistoryId: string } }>("/matching-rules/audit/:matchHistoryId", async (request, reply) => {
+  const matchHistoryId = Number(request.params.matchHistoryId);
+  if (!Number.isFinite(matchHistoryId) || matchHistoryId <= 0) {
+    return reply.code(400).send({ error: "gecersiz matchHistoryId" });
+  }
+
+  const res = await matchPool.query<{
+    id: string;
+    rule_id: string;
+    candidate_stock_id: number | null;
+    decision: string;
+    delta_score: string | null;
+    reason_text: string | null;
+    created_at: Date;
+  }>(
+    `SELECT id::text, rule_id::text, candidate_stock_id, decision, delta_score::text, reason_text, created_at
+     FROM matching_rule_audit
+     WHERE match_history_id = $1
+     ORDER BY id ASC`,
+    [matchHistoryId]
+  );
+
+  return {
+    items: res.rows.map((row) => ({
+      id: Number(row.id),
+      rule_id: Number(row.rule_id),
+      candidate_stock_id: row.candidate_stock_id !== null ? Number(row.candidate_stock_id) : null,
+      decision: row.decision,
+      delta_score: row.delta_score !== null ? Number(row.delta_score) : null,
+      reason_text: row.reason_text ?? "",
+      created_at: row.created_at
     }))
   };
 });
@@ -1397,10 +2146,9 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     END
   )`;
   const sqlTemperExpr = "COALESCE(NULLIF(sm.tamper, ''), sf.temper)";
-  const sqlSeriesPresentExpr = `(${sqlSeriesExpr} IS NOT NULL AND BTRIM(${sqlSeriesExpr}) <> '')`;
   const sqlErpCapExpr = "NULLIF(sm.erp_cap, 0)::float8";
 
-  const conditions: string[] = ["sm.is_active = TRUE", sqlSeriesPresentExpr];
+  const conditions: string[] = ["sm.is_active = TRUE"];
   const params: unknown[] = [extracted.normalized_text];
   let idx = 2;
 
@@ -1431,7 +2179,7 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     : "";
   const strictExactCapParams = inputThickness !== null ? [...params, inputThickness] : params;
   const allActiveExactCapWhereSql = exactCapCondition
-    ? `WHERE sm.is_active = TRUE AND ${sqlSeriesPresentExpr} AND ${exactCapCondition.replace("$CAP$", "$2")}`
+    ? `WHERE sm.is_active = TRUE AND ${exactCapCondition.replace("$CAP$", "$2")}`
     : "";
   const allActiveExactCapParams = inputThickness !== null ? [extracted.normalized_text, inputThickness] : [extracted.normalized_text];
 
@@ -1485,13 +2233,13 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     },
     {
       name: "all_active",
-      whereSql: `WHERE sm.is_active = TRUE AND ${sqlSeriesPresentExpr}`,
+      whereSql: "WHERE sm.is_active = TRUE",
       queryParams: [extracted.normalized_text],
       limit: candidateLimit
     },
     {
       name: "all_active_wide",
-      whereSql: `WHERE sm.is_active = TRUE AND ${sqlSeriesPresentExpr}`,
+      whereSql: "WHERE sm.is_active = TRUE",
       queryParams: [extracted.normalized_text],
       limit: Math.max(candidateLimit * 3, 800)
     }
@@ -1499,10 +2247,22 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
 
   let results: ScoredResult[] = [];
   let usedStage = "strict";
+  let ruleSummary: {
+    loadedRuleCount: number;
+    appliedStage: string | null;
+    rejectedCandidateCount: number;
+  } = {
+    loadedRuleCount: 0,
+    appliedStage: null,
+    rejectedCandidateCount: 0
+  };
+  const pendingRuleAudits: Array<{ ruleId: number; candidateStockId: number | null; decision: string; deltaScore: number | null; reasonText: string }> = [];
   const learningBoostMap = await buildLearningBoostMap({
     series: extracted.series,
     dim_text: extracted.dim_text
   });
+  const hardRules = await loadActiveHardRules();
+  ruleSummary.loadedRuleCount = hardRules.length;
 
   for (const stage of searchStages) {
     if (stage.name !== "strict" && stage.whereSql === searchStages[0].whereSql && stage.limit === searchStages[0].limit) {
@@ -1523,11 +2283,37 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
       continue;
     }
 
-    const rawScored = baseScoreCandidates(extracted, guidedCandidates, guidedCandidates.length || topK);
-    const guidedScored = applyGuidanceBoost(rawScored, guidedCandidates, guidance);
+    const hardRuleEval = evaluateHardRules(extracted, guidedCandidates, hardRules);
+    if (hardRuleEval.candidates.length === 0) {
+      ruleSummary.rejectedCandidateCount += guidedCandidates.length;
+      pendingRuleAudits.push(...hardRuleEval.audits.map((audit) => ({
+        ruleId: audit.ruleId,
+        candidateStockId: audit.candidateStockId,
+        decision: audit.decision,
+        deltaScore: audit.deltaScore,
+        reasonText: audit.reasonText
+      })));
+      continue;
+    }
+
+    const rawScored = baseScoreCandidates(extracted, hardRuleEval.candidates, hardRuleEval.candidates.length || topK).map((item) => ({
+      ...item,
+      rule_hits: hardRuleEval.candidateRuleHits.get(Number(item.stock_id)) ?? item.rule_hits ?? [],
+      hard_rule_pass: true
+    }));
+    const guidedScored = applyGuidanceBoost(rawScored, hardRuleEval.candidates, guidance);
     const boosted = applyLearningBoost(guidedScored, learningBoostMap, guidedScored.length || topK);
     results = await rerankResults(text, boosted, topK);
     usedStage = stage.name;
+    ruleSummary.appliedStage = stage.name;
+    ruleSummary.rejectedCandidateCount += guidedCandidates.length - hardRuleEval.candidates.length;
+    pendingRuleAudits.push(...hardRuleEval.audits.map((audit) => ({
+      ruleId: audit.ruleId,
+      candidateStockId: audit.candidateStockId,
+      decision: audit.decision,
+      deltaScore: audit.deltaScore,
+      reasonText: audit.reasonText
+    })));
 
     if (results.length > 0) {
       break;
@@ -1535,14 +2321,45 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
   }
 
   const historyRes = await matchPool.query<{ id: string }>(
-    `INSERT INTO match_history(input_text, extracted_json, results_json)
-     VALUES($1, $2::jsonb, $3::jsonb)
+    `INSERT INTO match_history(input_text, extracted_json, results_json, pipeline_version, rule_summary_json)
+     VALUES($1, $2::jsonb, $3::jsonb, $4, $5::jsonb)
      RETURNING id`,
-    [text, JSON.stringify(extracted), JSON.stringify(results)]
+    [text, JSON.stringify(extracted), JSON.stringify(results), "v2-start", JSON.stringify(ruleSummary)]
   );
+  const matchHistoryId = Number(historyRes.rows[0].id);
+
+  if (pendingRuleAudits.length > 0) {
+    for (const audit of pendingRuleAudits) {
+      await matchPool.query(
+        `INSERT INTO matching_rule_audit(match_history_id, rule_id, candidate_stock_id, decision, delta_score, reason_text)
+         VALUES($1,$2,$3,$4,$5,$6)`,
+        [matchHistoryId, audit.ruleId, audit.candidateStockId, audit.decision, audit.deltaScore, audit.reasonText]
+      );
+    }
+  }
+
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    await matchPool.query(
+      `INSERT INTO match_candidate_features(match_history_id, stock_id, rank_before_ml, was_selected, feature_json, base_score, final_score)
+       VALUES($1,$2,$3,FALSE,$4::jsonb,$5,$6)`,
+      [
+        matchHistoryId,
+        Number(result.stock_id),
+        index + 1,
+        JSON.stringify({
+          why: result.why,
+          rule_hits: result.rule_hits ?? [],
+          score_breakdown: result.score_breakdown ?? null
+        }),
+        result.score_breakdown ? result.score - result.score_breakdown.components.learning - result.score_breakdown.components.ml : result.score,
+        result.score
+      ]
+    );
+  }
 
   return {
-    matchHistoryId: Number(historyRes.rows[0].id),
+    matchHistoryId,
     extracted,
     searchStage: usedStage,
     results
@@ -1964,3 +2781,5 @@ app.listen({ host: "0.0.0.0", port: env.apiPort })
     app.log.error(err);
     process.exit(1);
   });
+
+

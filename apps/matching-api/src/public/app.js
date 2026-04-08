@@ -57,6 +57,19 @@ const offerMetaPaymentPlanEl = el("offerMetaPaymentPlan");
 const offerMetaIncotermEl = el("offerMetaIncoterm");
 const offerMetaDeliveryDateEl = el("offerMetaDeliveryDate");
 const offerMetaDescriptionEl = el("offerMetaDescription");
+const refreshRulesBtnEl = el("refreshRulesBtn");
+const ruleListBodyEl = el("ruleListBody");
+const ruleSetNameInputEl = el("ruleSetNameInput");
+const rulePriorityInputEl = el("rulePriorityInput");
+const ruleDescriptionInputEl = el("ruleDescriptionInput");
+const ruleTypeInputEl = el("ruleTypeInput");
+const ruleConditionInputEl = el("ruleConditionInput");
+const ruleEffectInputEl = el("ruleEffectInput");
+const createRuleBtnEl = el("createRuleBtn");
+const ruleTestTextInputEl = el("ruleTestTextInput");
+const ruleTestCandidateIdsInputEl = el("ruleTestCandidateIdsInput");
+const runRuleTestBtnEl = el("runRuleTestBtn");
+const ruleTestResultEl = el("ruleTestResult");
 
 let sourceMode = "text";
 let rows = [];
@@ -73,6 +86,69 @@ let activeRowDefaults = null;
 let currentMatchedOfferId = null;
 let offerMetaOpen = false;
 let matchedOfferLocked = false;
+let matchingRules = [];
+let pendingInstructionSuggestion = null;
+
+function mergeMatchPolicy(nextPolicy) {
+  if (!nextPolicy) return;
+  const current = activeMatchPolicy || {};
+  activeMatchPolicy = {
+    ...current,
+    ...nextPolicy,
+    requiredTerms: [...new Set([...(current.requiredTerms || []), ...(nextPolicy.requiredTerms || [])])],
+    requiredStockCodeTerms: [...new Set([...(current.requiredStockCodeTerms || []), ...(nextPolicy.requiredStockCodeTerms || [])])],
+    requiredStockNameTerms: [...new Set([...(current.requiredStockNameTerms || []), ...(nextPolicy.requiredStockNameTerms || [])])],
+    requiredNonEmptyFields: [...new Set([...(current.requiredNonEmptyFields || []), ...(nextPolicy.requiredNonEmptyFields || [])])]
+  };
+}
+
+function parseInstructionTargetScope(message) {
+  const normalized = String(message || "")
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ı/g, "i")
+    .trim();
+
+  const target = {};
+  const tamperEmpty = /\btamperi?\s+bos\s+olan/i.test(normalized) || /\btemperi?\s+bos\s+olan/i.test(normalized);
+  const tamperMatch = normalized.match(/\btamperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\s+olan/i)
+    || normalized.match(/\btemperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\s+olan/i);
+  const alasimMatch = normalized.match(/\balasimi?\s+([1-9]\d{3})\s+olan/i) || normalized.match(/\b([1-9]\d{3})\s+olan/i);
+  const stockCodeMatch = normalized.match(/\bstok\s*kodunda\s+([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin|olsun)\s+olan/i);
+  const stockNameMatch = normalized.match(/\bstok\s*adinda\s+(.+?)\s+(?:gecen|geçen|gecsin|geçsin|olsun)\s+olan/i)
+    || normalized.match(/\bstok\s*adinda\s+(.+?)\s+olan/i);
+  const asksTargetedAction = /\bolanlar/i.test(normalized)
+    || /\bolanlari/i.test(normalized)
+    || /\bolanlarin/i.test(normalized)
+    || /\bolanlari\s+(?:ara|getir|esle|eşle)/i.test(normalized)
+    || /\bolanlarin\s+stok/i.test(normalized)
+    || /\byeniden\s+ara/i.test(normalized);
+
+  if (tamperEmpty) target.tamperEmpty = true;
+  if (tamperMatch) target.tamper = tamperMatch[1].toUpperCase();
+  if (alasimMatch) target.alasim = alasimMatch[1];
+  if (stockCodeMatch) target.stockCodeTerm = stockCodeMatch[1].toUpperCase();
+  if (stockNameMatch) target.stockNameTerm = stockNameMatch[1].trim().toLocaleLowerCase("tr-TR");
+
+  return asksTargetedAction && Object.keys(target).length ? target : null;
+}
+
+function rowMatchesTargetScope(row, target) {
+  if (!target) return true;
+  const selected = selectedCandidate(row);
+  const tamper = String(row.tamper ?? selected?.tamper ?? "").trim().toUpperCase();
+  const alasim = String(row.alasim ?? selected?.alasim ?? "").trim();
+  const stockCode = String(selected?.stock_code ?? "").toUpperCase();
+  const stockName = String(selected?.stock_name ?? "").toLocaleLowerCase("tr-TR");
+
+  if (target.tamperEmpty && tamper) return false;
+  if (target.tamper && tamper !== target.tamper) return false;
+  if (target.alasim && alasim !== target.alasim) return false;
+  if (target.stockCodeTerm && !stockCode.includes(target.stockCodeTerm)) return false;
+  if (target.stockNameTerm && !stockName.includes(target.stockNameTerm)) return false;
+  return true;
+}
 
 const OFFER_META_OPTIONS = {
 };
@@ -685,6 +761,171 @@ function appendInstructionMessage(role, text) {
   instructionChatBodyEl.scrollTop = instructionChatBodyEl.scrollHeight;
 }
 
+function normalizeInstructionText(value) {
+  return String(value || "")
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ı/g, "i")
+    .trim();
+}
+
+function isWholeTableRerunInstruction(message) {
+  const normalized = normalizeInstructionText(message);
+  if (!normalized) return false;
+  const directWholeTableCommands = [
+    "yeniden ara",
+    "yeniden esle",
+    "yeniden eşle",
+    "yeniden esles",
+    "yeniden eşleş",
+    "tekrar ara",
+    "yenile"
+  ];
+  if (directWholeTableCommands.includes(normalized)) {
+    return true;
+  }
+  const mentionsAllRows = /\b(butun|bütün|tum|tüm)\s+satir/i.test(normalized)
+    || /\b(tumunu|tümünü|hepsini)\b/i.test(normalized);
+  const rerunVerb = /\b(yeniden\s+(ara|esle|eşle)|yenile|tekrar\s+(ara|esle|eşle)|esle|eşle)\b/i.test(normalized);
+  return mentionsAllRows && rerunVerb;
+}
+
+function buildInstructionSuggestion(message) {
+  const normalized = normalizeInstructionText(message);
+  if (!normalized) return null;
+
+  const scopeParts = [];
+  const actionParts = [];
+  const ruleParts = [];
+
+  const tamperValue = normalized.match(/\btamperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i)
+    || normalized.match(/\btemperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i);
+  const alasimValue = normalized.match(/\balasimi?\s+([1-9]\d{3})\b/i);
+  const dim1Value = normalized.match(/\bkalinlik\s+(\d+(?:[.,]\d+)?)\b/i);
+  const dim2Value = normalized.match(/\ben\s+(\d+(?:[.,]\d+)?)\b/i);
+  const dim3Value = normalized.match(/\bboy\s+(\d+(?:[.,]\d+)?)\b/i);
+  const stockCodeValue = normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin|olsun)\b/i)
+    || normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,12})\s+ile\s+baslayan\b/i)
+    || normalized.match(/\b([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin)\s+stok\s*kod(?:u|unda)?\b/i);
+  const stockNameValue = normalized.match(/\bstok\s*ad(?:i|ı|inda|ında)?\s+(.+?)\s+(?:gecen|geçen|gecsin|geçsin|olsun)\b/i)
+    || normalized.match(/\b(.+?)\s+(?:gecen|geçen|gecsin|geçsin)\s+stok\s*ad(?:i|ı|inda|ında)?\b/i);
+
+  if (/\btamperi?\s+bos\s+olan/i.test(normalized) || /\btemperi?\s+bos\s+olan/i.test(normalized)) {
+    scopeParts.push("tamperi boş olanların");
+  } else if (tamperValue) {
+    scopeParts.push(`tamperi ${tamperValue[1].toUpperCase()} olanların`);
+  }
+
+  if (alasimValue) scopeParts.push(`alaşımı ${alasimValue[1]} olanların`);
+
+  if (stockNameValue) {
+    const term = stockNameValue[1].trim();
+    actionParts.push(`${scopeParts.length ? "" : ""}stok adında ${term} geçsin`);
+  } else if (stockCodeValue) {
+    const term = stockCodeValue[1].trim().toUpperCase();
+    actionParts.push(`stok kodunda ${term} geçsin`);
+  } else if (dim1Value || dim2Value || dim3Value || tamperValue || alasimValue) {
+    const dimParts = [];
+    if (dim1Value) dimParts.push(`kalınlık ${String(dim1Value[1]).replace(",", ".")}`);
+    if (dim2Value) dimParts.push(`en ${String(dim2Value[1]).replace(",", ".")}`);
+    if (dim3Value) dimParts.push(`boy ${String(dim3Value[1]).replace(",", ".")}`);
+    if (tamperValue && !scopeParts.length) dimParts.unshift(`tamper ${tamperValue[1].toUpperCase()}`);
+    if (alasimValue && !scopeParts.length) dimParts.unshift(`${alasimValue[1]} serisinde`);
+    if (dimParts.length) actionParts.push(`${dimParts.join(" ")} olanlarda ara`);
+  }
+
+  if (/\btamper\s+bos\s+olamaz\b/i.test(normalized) || /\btemper\s+bos\s+olamaz\b/i.test(normalized)) {
+    ruleParts.push("tamper boş olamaz");
+  }
+  if (/\balasim\s+bos\s+olamaz\b/i.test(normalized) || /\balaşim\s+bos\s+olamaz\b/i.test(normalized) || /\balaşım\s+bos\s+olamaz\b/i.test(normalized)) {
+    ruleParts.push("alaşım boş olamaz");
+  }
+  if (/\bstok\s*kodu\s+bos\s+olamaz\b/i.test(normalized)) {
+    ruleParts.push("stok kodu boş olamaz");
+  }
+  if (/\bstok\s*adi\s+bos\s+olamaz\b/i.test(normalized) || /\bstok\s*adı\s+bos\s+olamaz\b/i.test(normalized)) {
+    ruleParts.push("stok adı boş olamaz");
+  }
+
+  let suggestion = "";
+  if (scopeParts.length && actionParts.length) {
+    suggestion = `${scopeParts.join(" ve ")} ${actionParts.join(", ")}`;
+  } else if (actionParts.length) {
+    suggestion = actionParts.join(", ");
+  }
+
+  suggestion = suggestion
+    .replace(/\bbutun\s+satirlarda\b/gi, "")
+    .replace(/\btum\s+satirlarda\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  if (ruleParts.length) {
+    suggestion = suggestion ? `${suggestion}. ${ruleParts.join(". ")}.` : `${ruleParts.join(". ")}.`;
+  }
+
+  suggestion = suggestion.replace(/\.\s*\./g, ".").trim();
+  if (!suggestion) return null;
+
+  return suggestion.charAt(0).toLocaleUpperCase("tr-TR") + suggestion.slice(1);
+}
+
+function appendInstructionSuggestion(originalMessage, suggestionText) {
+  if (!instructionChatBodyEl) return;
+  pendingInstructionSuggestion = { originalMessage, suggestionText };
+
+  const item = document.createElement("div");
+  item.className = "instruction-chat-msg assistant";
+
+  const bubble = document.createElement("div");
+  bubble.className = "instruction-chat-bubble instruction-chat-bubble--suggestion";
+
+  const title = document.createElement("div");
+  title.className = "instruction-suggestion-title";
+  title.textContent = "Talimat tam anlaşılamadı. Şunu uygulayayım mı?";
+
+  const suggestion = document.createElement("div");
+  suggestion.className = "instruction-suggestion-text";
+  suggestion.textContent = suggestionText;
+
+  const actions = document.createElement("div");
+  actions.className = "instruction-suggestion-actions";
+
+  const approveBtn = document.createElement("button");
+  approveBtn.type = "button";
+  approveBtn.className = "btn-primary instruction-suggestion-btn";
+  approveBtn.textContent = "Evet, bunu uygula";
+  approveBtn.addEventListener("click", async () => {
+    const pending = pendingInstructionSuggestion;
+    pendingInstructionSuggestion = null;
+    if (!pending) return;
+    appendInstructionMessage("assistant", `Öneri uygulanıyor: ${pending.suggestionText}`);
+    await rerunMatchingByInstruction(pending.suggestionText, { fromSuggestion: true });
+  });
+
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "btn-secondary instruction-suggestion-btn";
+  editBtn.textContent = "Metne yaz";
+  editBtn.addEventListener("click", () => {
+    if (instructionChatInputEl) {
+      instructionChatInputEl.value = suggestionText;
+      instructionChatInputEl.focus();
+      instructionChatInputEl.setSelectionRange(instructionChatInputEl.value.length, instructionChatInputEl.value.length);
+    }
+  });
+
+  actions.appendChild(approveBtn);
+  actions.appendChild(editBtn);
+  bubble.appendChild(title);
+  bubble.appendChild(suggestion);
+  bubble.appendChild(actions);
+  item.appendChild(bubble);
+  instructionChatBodyEl.appendChild(item);
+  instructionChatBodyEl.scrollTop = instructionChatBodyEl.scrollHeight;
+}
+
 function sanitizeProfileToken(value) {
   return String(value ?? "")
     .toLocaleLowerCase("tr-TR")
@@ -723,13 +964,34 @@ function mergeRowDefaults(nextDefaults) {
   };
 }
 
-async function rerunMatchingByInstruction(message) {
+async function rerunMatchingByInstruction(message, options = {}) {
   const response = await api("/instructions/plan", "POST", {
     message,
     rowCount: rows.length,
     sourceMode
   });
   const plan = response.plan || {};
+  const targetScope = parseInstructionTargetScope(message);
+  const targetIndexes = targetScope
+    ? rows.map((row, index) => (rowMatchesTargetScope(row, targetScope) ? index : -1)).filter((index) => index >= 0)
+    : [];
+  if (targetScope && targetIndexes.length === 0) {
+    appendInstructionMessage("assistant", "Bu talimata uyan bir satır bulunamadı. Bu yüzden tüm satırlar yeniden aranmadı.");
+    return;
+  }
+  const hasRowCommands = Array.isArray(plan.rowCommands) && plan.rowCommands.length > 0;
+  const wholeTableRerun = isWholeTableRerunInstruction(message);
+  const hasMatchIntent = Boolean(plan.matchPolicy || plan.extractionPrompt || hasRowCommands || wholeTableRerun);
+
+  if (!hasMatchIntent) {
+    const suggestion = options.fromSuggestion ? null : buildInstructionSuggestion(message);
+    if (suggestion && normalizeInstructionText(suggestion) !== normalizeInstructionText(message)) {
+      appendInstructionSuggestion(message, suggestion);
+    } else {
+      appendInstructionMessage("assistant", "Talimat anlaşılmadı. Örnek: `tamper h14 olanlarda ara`, `kalınlık 10 olanlarda ara`, `en 150 boy 3000 olanlarda ara`, `stok adı alurex geçenlerde ara`, `2. satır kesim yok`.");
+    }
+    return;
+  }
 
   if (plan.extractionPrompt && instructionTextEl) {
     instructionTextEl.value = plan.extractionPrompt;
@@ -738,13 +1000,13 @@ async function rerunMatchingByInstruction(message) {
     matchInstructionTextEl.value = plan.extractionPrompt;
   }
   if (plan.matchPolicy) {
-    activeMatchPolicy = plan.matchPolicy;
+    mergeMatchPolicy(plan.matchPolicy);
   }
   if (plan.rowDefaults) {
     mergeRowDefaults(plan.rowDefaults);
   }
 
-  const willRerun = Boolean(plan.needsRematch || plan.needsReextract);
+  const willRerun = Boolean(plan.needsRematch || plan.needsReextract || wholeTableRerun);
   appendInstructionMessage("assistant", willRerun
     ? "Talimat alındı. Yeniden analiz ve eşleştirme uygulanıyor..."
     : "Talimat alındı. Mevcut satırlar üzerinde güncelleme uygulanıyor...");
@@ -770,11 +1032,39 @@ async function rerunMatchingByInstruction(message) {
       } else {
         throw new Error("Önce metin veya doküman girin.");
       }
-      await runAnalysis(doc, {
-        onProgress: ({ current, total }) => {
-          setAnalysisModal(true, `${current}/${total} satır talimata göre analiz/eşleştirme yapılıyor...`);
+      if (targetIndexes.length > 0 && extractedDoc?.items?.length === rows.length) {
+        const items = extractedDoc.items;
+        for (let position = 0; position < targetIndexes.length; position += 1) {
+          const rowIndex = targetIndexes[position];
+          const item = items[rowIndex];
+          if (!item) continue;
+          setAnalysisModal(true, `${position + 1}/${targetIndexes.length} hedef satır yeniden aranıyor...`);
+          const filters = item.series ? { series: item.series } : undefined;
+          const res = await api("/match", "POST", {
+            text: item.query,
+            topK: candidateCount(),
+            matchInstruction: currentMatchInstruction() || undefined,
+            matchPolicy: currentMatchPolicy() || undefined,
+            filters
+          });
+          const candidates = res.results || [];
+          rows[rowIndex] = {
+            ...rows[rowIndex],
+            matchHistoryId: Number(res.matchHistoryId),
+            candidates,
+            selected_stock_id: candidates[0]?.stock_id ?? null,
+            selected_score: candidates[0]?.score ?? null,
+            alasim: candidates[0]?.alasim ?? rows[rowIndex].alasim ?? null,
+            tamper: candidates[0]?.tamper ?? rows[rowIndex].tamper ?? null
+          };
         }
-      });
+      } else {
+        await runAnalysis(doc, {
+          onProgress: ({ current, total }) => {
+            setAnalysisModal(true, `${current}/${total} satır talimata göre analiz/eşleştirme yapılıyor...`);
+          }
+        });
+      }
       instructionResult = applyInstructionCommands(plan.rowCommands || []);
       renderTable();
     } else {
@@ -793,7 +1083,7 @@ async function rerunMatchingByInstruction(message) {
     const overrideNote = notes.length ? ` Uygulanan komutlar: ${notes.join(" | ")}.` : "";
     const learnNote = pendingChatLearning ? " Bu talimat, Seçimleri Kaydet sonrası policy adayı olarak değerlendirilecek." : "";
     appendInstructionMessage("assistant", willRerun
-      ? `Tamamlandı. ${rows.length} satır güncellendi.${overrideNote}${learnNote}`
+      ? `Tamamlandı. ${(targetIndexes.length > 0 ? targetIndexes.length : rows.length)} satır güncellendi.${overrideNote}${learnNote}`
       : `Tamamlandı. ${instructionResult.changedRows} satır güncellendi.${overrideNote}${learnNote}`);
   } catch (err) {
     appendInstructionMessage("assistant", `İşlem başarısız: ${err.message}`);
@@ -846,6 +1136,7 @@ instructionChatFormEl?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = instructionChatInputEl?.value?.trim() || "";
   if (!message) return;
+  pendingInstructionSuggestion = null;
   appendInstructionMessage("user", message);
   if (instructionChatInputEl) instructionChatInputEl.value = "";
   await rerunMatchingByInstruction(message);
@@ -942,9 +1233,105 @@ function optionLabel(candidate) {
   return `${candidate.stock_code || "-"}`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function prettyJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function parseJsonInput(raw, label) {
+  try {
+    return JSON.parse(String(raw ?? "").trim());
+  } catch (err) {
+    throw new Error(`${label} geçerli JSON olmalı. ${err.message}`);
+  }
+}
+
 function selectedCandidate(row) {
   const candidates = Array.isArray(row?.candidates) ? row.candidates : [];
   return candidates.find((candidate) => Number(candidate.stock_id) === Number(row.selected_stock_id)) || null;
+}
+
+function renderSelectedCandidateMeta(row) {
+  const selected = selectedCandidate(row);
+  if (!selected) {
+    return "";
+  }
+  return "";
+}
+
+function renderMatchingRules() {
+  if (!ruleListBodyEl) return;
+  if (!Array.isArray(matchingRules) || matchingRules.length === 0) {
+    ruleListBodyEl.innerHTML = '<tr><td colspan="6" class="muted center">Kural yok.</td></tr>';
+    return;
+  }
+
+  ruleListBodyEl.innerHTML = matchingRules.map((rule) => `
+    <tr>
+      <td>${rule.id}</td>
+      <td>${escapeHtml(rule.rule_set_name || "-")}</td>
+      <td>
+        <div>${escapeHtml(rule.description || "-")}</div>
+        <div class="small muted">${escapeHtml(rule.effect_json?.type || "-")}</div>
+      </td>
+      <td>${escapeHtml(rule.rule_type || "-")}</td>
+      <td>${rule.active ? "Aktif" : "Pasif"}</td>
+      <td>
+        <button type="button" class="btn-secondary mini-btn" data-k="toggle-rule" data-rule-id="${rule.id}" data-next-active="${rule.active ? "0" : "1"}">
+          ${rule.active ? "Pasif Yap" : "Aktif Yap"}
+        </button>
+      </td>
+    </tr>
+  `).join("");
+
+  ruleListBodyEl.querySelectorAll("[data-k='toggle-rule']").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      const ruleId = Number(event.currentTarget.dataset.ruleId);
+      const nextActive = event.currentTarget.dataset.nextActive === "1";
+      try {
+        await api(`/matching-rules/${ruleId}`, "PUT", { active: nextActive });
+        await loadMatchingRules();
+        saveStatusEl.textContent = `Kural #${ruleId} ${nextActive ? "aktif" : "pasif"} yapıldı.`;
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+  });
+}
+
+async function loadMatchingRules() {
+  if (!ruleListBodyEl) return;
+  ruleListBodyEl.innerHTML = '<tr><td colspan="6" class="muted center">Kurallar yükleniyor...</td></tr>';
+  const response = await api("/matching-rules", "GET");
+  matchingRules = Array.isArray(response.items) ? response.items : [];
+  renderMatchingRules();
+}
+
+function collectRuleTestCandidateIds() {
+  const manual = String(ruleTestCandidateIdsInputEl?.value ?? "").trim();
+  if (manual) {
+    return manual
+      .split(",")
+      .map((item) => Number(item.trim()))
+      .filter((item) => Number.isFinite(item) && item > 0);
+  }
+
+  const ids = rows
+    .flatMap((row) => Array.isArray(row.candidates) ? row.candidates.map((candidate) => Number(candidate.stock_id)) : [])
+    .filter((item) => Number.isFinite(item) && item > 0);
+  return [...new Set(ids)].slice(0, 20);
 }
 
 function createEmptyRow(overrides = {}) {
@@ -1411,7 +1798,10 @@ function renderTable() {
             `).join("")}
           </select>
         </td>
-        <td>${selected?.stock_name ?? "-"}</td>
+        <td class="stock-name-cell">
+          <div>${selected?.stock_name ?? "-"}</div>
+          ${renderSelectedCandidateMeta(row)}
+        </td>
         <td class="pick-cell">
           <button type="button" class="btn-secondary mini-btn" data-k="open-stock-modal" data-i="${index}" ${matchedOfferLocked ? "disabled" : ""}>...</button>
         </td>
@@ -1638,6 +2028,8 @@ async function saveMatchedOfferRecord() {
 }
 
 function collectMatchedOfferMeta() {
+  const transportTypeCode = offerMetaIncotermEl?.value?.trim() || "";
+  const incotermLabel = offerMetaIncotermEl?._lookupInput?.value?.trim() || transportTypeCode;
   return {
     offerDate: offerMetaDateEl?.value?.trim() || "",
     movementCode: offerMetaMovementCodeEl?.value?.trim() || "",
@@ -1645,7 +2037,8 @@ function collectMatchedOfferMeta() {
     representativeCode: offerMetaRepresentativeEl?.value?.trim() || "",
     warehouseCode: offerMetaWarehouseEl?.value?.trim() || "",
     paymentPlanCode: offerMetaPaymentPlanEl?.value?.trim() || "",
-    incotermName: offerMetaIncotermEl?.value?.trim() || "",
+    incotermName: incotermLabel,
+    transportTypeCode,
     deliveryDate: offerMetaDeliveryDateEl?.value?.trim() || "",
     description: offerMetaDescriptionEl?.value?.trim() || ""
   };
@@ -1696,10 +2089,12 @@ function applyMatchedOfferMeta(meta = {}) {
     offerMetaPaymentPlanEl.dispatchEvent(new Event("change", { bubbles: true }));
   }
   if (offerMetaIncotermEl) {
-    fillSelectOptions(offerMetaIncotermEl, meta.incotermName ? [{ value: meta.incotermName, label: meta.incotermName }] : []);
-    offerMetaIncotermEl.value = meta.incotermName || "";
+    const incotermValue = meta.transportTypeCode || meta.incotermName || "";
+    const incotermLabel = meta.incotermName || meta.transportTypeCode || "";
+    fillSelectOptions(offerMetaIncotermEl, incotermValue ? [{ value: incotermValue, label: incotermLabel }] : []);
+    offerMetaIncotermEl.value = incotermValue;
     if (offerMetaIncotermEl._lookupInput) {
-      offerMetaIncotermEl._lookupInput.value = meta.incotermName || "";
+      offerMetaIncotermEl._lookupInput.value = incotermLabel;
     }
     offerMetaIncotermEl.dispatchEvent(new Event("change", { bubbles: true }));
   }
@@ -2195,8 +2590,72 @@ sendOfferBtnEl?.addEventListener("click", async () => {
   }
 });
 
+refreshRulesBtnEl?.addEventListener("click", async () => {
+  try {
+    await loadMatchingRules();
+    saveStatusEl.textContent = "Kurallar yenilendi.";
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+createRuleBtnEl?.addEventListener("click", async () => {
+  try {
+    const ruleSetName = ruleSetNameInputEl?.value?.trim() || "";
+    const priority = Number(rulePriorityInputEl?.value ?? 100);
+    const description = ruleDescriptionInputEl?.value?.trim() || "";
+    const ruleType = ruleTypeInputEl?.value || "hard_filter";
+    const conditionJson = parseJsonInput(ruleConditionInputEl?.value, "Condition JSON");
+    const effectJson = parseJsonInput(ruleEffectInputEl?.value, "Effect JSON");
+
+    if (!ruleSetName || !description) {
+      throw new Error("Rule set adı ve açıklama gerekli.");
+    }
+
+    const result = await api("/matching-rules", "POST", {
+      ruleSetName,
+      priority,
+      ruleType,
+      targetLevel: "pair",
+      conditionJson,
+      effectJson,
+      stopOnMatch: true,
+      description,
+      active: true
+    });
+    await loadMatchingRules();
+    saveStatusEl.textContent = `Kural eklendi. Rule Set #${result.ruleSetId}, Rule #${result.ruleId}`;
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+runRuleTestBtnEl?.addEventListener("click", async () => {
+  try {
+    const text = String(ruleTestTextInputEl?.value ?? "").trim() || String(orderTextEl?.value ?? "").trim();
+    const candidateStockIds = collectRuleTestCandidateIds();
+    if (!text) {
+      throw new Error("Test metni gerekli.");
+    }
+    if (candidateStockIds.length === 0) {
+      throw new Error("Test için candidate stock id gerekli.");
+    }
+
+    const result = await api("/matching-rules/test", "POST", {
+      text,
+      candidateStockIds
+    });
+    if (ruleTestResultEl) {
+      ruleTestResultEl.textContent = prettyJson(result);
+    }
+    saveStatusEl.textContent = `Kural testi tamamlandı. Önce: ${result.beforeCount}, Sonra: ${result.afterCount}`;
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
 setInstructionDrawerOpen(false);
-appendInstructionMessage("assistant", "Eşleştirme talimatınızı yazın. Gönder dediğinizde mevcut satırlar talimata göre yeniden eşleştirilir.");
+appendInstructionMessage("assistant", "Eşleştirme talimatınızı yazın. Bu sohbet zorunlu kural eklemez; mevcut satırları talimatınıza göre yeniden analiz eder ve eşleştirir.");
 const initialMode = document.querySelector('input[name="sourceMode"]:checked')?.value || "text";
 setMode(initialMode);
 setFileStatus("Henüz dosya seçilmedi.");
@@ -2213,6 +2672,12 @@ const urlRecordId = Number(pageParams.get("recordId"));
 if (Number.isFinite(urlRecordId) && urlRecordId > 0) {
   loadMatchedOffer(urlRecordId).catch((err) => {
     saveStatusEl.textContent = `Kayıt yüklenemedi: ${err.message}`;
+  });
+}
+
+if (ruleListBodyEl) {
+  loadMatchingRules().catch((err) => {
+    ruleListBodyEl.innerHTML = `<tr><td colspan="6" class="muted center">Kural yüklenemedi: ${escapeHtml(err.message)}</td></tr>`;
   });
 }
 

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+﻿import { createHash } from "node:crypto";
 import { InstructionPolicyPayload, MatchPolicy, RowInstructionCommand, RowInstructionSet } from "@smp/common";
 import { matchPool } from "@smp/db";
 import { ExtractionFingerprint } from "./extraction-learning";
@@ -30,7 +30,8 @@ function normalizeText(value: string): string {
     .toLocaleLowerCase("tr-TR")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/Ä±/g, "i")
+    .replace(/ı/g, "i")
+    .replace(/Ã„Â±/g, "i")
     .trim();
 }
 
@@ -82,7 +83,7 @@ function parseRowCommands(message: string, rowCount: number): {
     return { commands: [], ignored: [] };
   }
 
-  const rowRefPattern = /(\d+)\.\s*sat[ıi]r(?:ı|i|a|e|da|de|daki|deki|icin|için)?/g;
+  const rowRefPattern = /(\d+)\.\s*sat[Ä±i]r(?:Ä±|i|a|e|da|de|daki|deki|icin|iÃ§in)?/g;
   const rowRefs = [...normalized.matchAll(rowRefPattern)];
   const commands: RowInstructionCommand[] = [];
   const ignored: Array<{ reason: string; rowNumber?: number }> = [];
@@ -136,46 +137,95 @@ export function parseMatchPolicy(instruction: string | undefined | null): MatchP
   const normalized = normalizeText(instruction ?? "");
   if (!normalized) return null;
 
-  const prefixMatch = normalized.match(/\b([a-z0-9._-]{2,12})\s+ile baslayan stok/);
+  const prefixMatch = normalized.match(/\b([a-z0-9._-]{2,12})\s+ile baslayan(?:\s+stok(?:lar|lari|larda)?)?(?:\s+(?:ara|getir|goster|esle|eşle))?\b/)
+    || normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,12})\s+ile baslayan(?:larda|lar|lari)?(?:\s+(?:ara|getir|goster|esle|eşle))?\b/i);
   const seriesPatterns = [
     /\b([1-9]\d{3})\s+(?:gecen|serisini|serisi|seri)\b/,
-    /\b(?:alasim|alaşim)\s+([1-9]\d{3})\b/,
-    /\b([1-9]\d{3})\s+(?:lerde|larda|olanlar|olanlari|olanları)\b/,
+    /\b([1-9]\d{3})\s+serisinde\b/,
+    /\b([1-9]\d{3})\s+serisinde\s+(?:ara|getir|goster)\b/,
+    /\b([1-9]\d{3})\s+serisine\b/,
+    /\b([1-9]\d{3})\s+serisine\s+(?:bak|gore|gÃ¶re)\b/,
+    /\b(?:alasim|alaÅŸim)\s+([1-9]\d{3})\b/,
+    /\b([1-9]\d{3})\s+(?:lerde|larda|olanlar|olanlari|olanlarÄ±)\b/,
     /\bsadece\s+([1-9]\d{3})\s+stoklarda\b/,
     /\b([1-9]\d{3})\s+(?:stoklarda|stoklarda ara|lerde ara|larda ara)\b/,
-    /\b([1-9]\d{3})\s+(?:icin|için)\s+ara\b/,
-    /\b([1-9]\d{3})\s+(?:getir|ara|goster|göster)\b/
+    /\b([1-9]\d{3})\s+(?:icin|iÃ§in)\s+ara\b/,
+    /\b([1-9]\d{3})\s+(?:getir|ara|goster|gÃ¶ster)\b/
   ];
   const seriesMatch = seriesPatterns.map((pattern) => normalized.match(pattern)).find(Boolean) ?? null;
   const temperPatterns = [
+    /\btamper\s*(?:=|:)?\s*(t\d{1,4}|h\d{1,4}|o|f)\b/i,
+    /\btamperi?\s*(?:=|:)?\s*(t\d{1,4}|h\d{1,4}|o|f)\b/i,
     /\b(t\d{1,4}|h\d{1,4}|o|f)\s+(?:temperde|tempere|temper|durumunda)\b/i,
     /\btemper\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i,
-    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+(?:olanlar|olanlari|olanları|getir|ara)\b/i
+    /\btemperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i,
+    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+tamper\b/i,
+    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+(?:olanlar|olanlari|olanlarÄ±|getir|ara)\b/i
   ];
   const temperMatch = temperPatterns.map((pattern) => normalized.match(pattern)).find(Boolean) ?? null;
+  const dim1Match = normalized.match(/\b(?:kalinlik|kalÄ±nlÄ±k)\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
+  const dim2Match = normalized.match(/\ben\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
+  const dim3Match = normalized.match(/\bboy\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
+  const stockCodeContainsMatch = normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin|olsun)(?:lerde|larda)?\b/i)
+    || normalized.match(/\b([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin)(?:lerde|larda)?\s+stok\s*kod(?:u|unda)?\b/i);
+  const stockNameContainsMatch = normalized.match(/\bstok\s*ad(?:i|ı|inda|ında)?\s+(.+?)\s+(?:gecen|geçen|gecsin|geçsin|olsun)(?:lerde|larda)?\b/i)
+    || normalized.match(/\b(.+?)\s+(?:gecen|geçen|gecsin|geçsin)(?:lerde|larda)?\s+stok\s*ad(?:i|ı|inda|ında)?\b/i);
+  const stockCodeActionMatch = normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,30})\s+(?:gecsin|geçsin|olsun)\b/i);
+  const stockNameActionMatch = normalized.match(/\bstok\s*ad(?:i|ı|inda|ında)?\s+(.+?)\s+(?:gecsin|geçsin|olsun)\b/i);
   const productTypePatterns: Array<{ pattern: RegExp; value: string }> = [
     { pattern: /\bboru\b/, value: "BORU" },
     { pattern: /\bprofil\b/, value: "PROFIL" },
     { pattern: /\blama\b/, value: "LAMA" },
     { pattern: /\bsac\b/, value: "SAC" },
-    { pattern: /\bkosebent\b|\bköşebent\b/, value: "KOSEBENT" },
+    { pattern: /\bkosebent\b|\bkÃ¶ÅŸebent\b/, value: "KOSEBENT" },
     { pattern: /\bmil\b/, value: "MIL" },
     { pattern: /\bplaka\b/, value: "PLAKA" }
   ];
   const preferredProductType = productTypePatterns.find((item) => item.pattern.test(normalized))?.value ?? null;
-  const quotedTerms = [...normalized.matchAll(/["â€œâ€']([^"â€œâ€']{2,40})["â€œâ€']/g)].map((match) => match[1].trim());
+  const quotedTerms = [...normalized.matchAll(/["Ã¢â‚¬Å“Ã¢â‚¬Â']([^"Ã¢â‚¬Å“Ã¢â‚¬Â']{2,40})["Ã¢â‚¬Å“Ã¢â‚¬Â']/g)].map((match) => match[1].trim());
   const genericTerms = [...normalized.matchAll(/\b([a-z0-9._-]{2,20})\s+gecen stok/g)].map((match) => match[1].trim());
   const requiredTerms = [...new Set([...quotedTerms, ...genericTerms].filter(Boolean))];
+  const requiredStockCodeTerms = (stockCodeContainsMatch?.[1] || stockCodeActionMatch?.[1])
+    ? [String(stockCodeContainsMatch?.[1] || stockCodeActionMatch?.[1]).trim().toUpperCase()]
+    : [];
+  const requiredStockNameTerms = (stockNameContainsMatch?.[1] || stockNameActionMatch?.[1])
+    ? String(stockNameContainsMatch?.[1] || stockNameActionMatch?.[1]).trim().split(/\s+/).filter((term) => term.length >= 2)
+    : [];
+  const requiredNonEmptyFields = [
+    /\btamper\s+bos\s+olamaz\b/i.test(normalized) || /\btemper\s+bos\s+olamaz\b/i.test(normalized) ? "temper" : null,
+    /\balasim\s+bos\s+olamaz\b/i.test(normalized) || /\balaÅŸim\s+bos\s+olamaz\b/i.test(normalized) ? "alasim" : null,
+    /\bstok\s*kodu\s+bos\s+olamaz\b/i.test(normalized) ? "stock_code" : null,
+    /\bstok\s*adi\s+bos\s+olamaz\b/i.test(normalized) || /\bstok\s*adÄ±\s+bos\s+olamaz\b/i.test(normalized) ? "stock_name" : null,
+    /\bkalinlik\s+bos\s+olamaz\b/i.test(normalized) || /\bkalÄ±nlÄ±k\s+bos\s+olamaz\b/i.test(normalized) ? "dim1" : null,
+    /\ben\s+bos\s+olamaz\b/i.test(normalized) ? "dim2" : null,
+    /\bboy\s+bos\s+olamaz\b/i.test(normalized) ? "dim3" : null
+  ].filter((value): value is string => Boolean(value));
 
   const policy: MatchPolicy = {
     stockCodePrefix: prefixMatch?.[1]?.toUpperCase() ?? null,
     requiredTerms,
+    requiredStockCodeTerms,
+    requiredStockNameTerms,
+    requiredNonEmptyFields,
     preferredSeries: seriesMatch?.[1] ?? null,
     preferredTemper: temperMatch?.[1]?.toUpperCase() ?? null,
-    preferredProductType
+    preferredProductType,
+    preferredDim1: dim1Match ? Number(dim1Match[1].replace(',', '.')) : null,
+    preferredDim2: dim2Match ? Number(dim2Match[1].replace(',', '.')) : null,
+    preferredDim3: dim3Match ? Number(dim3Match[1].replace(',', '.')) : null
   };
 
-  if (!policy.stockCodePrefix && !policy.preferredSeries && !policy.preferredTemper && !policy.preferredProductType && requiredTerms.length === 0) {
+  if (!policy.stockCodePrefix
+    && !policy.preferredSeries
+    && !policy.preferredTemper
+    && !policy.preferredProductType
+    && policy.preferredDim1 == null
+    && policy.preferredDim2 == null
+    && policy.preferredDim3 == null
+    && requiredTerms.length === 0
+    && requiredStockCodeTerms.length === 0
+    && requiredStockNameTerms.length === 0
+    && requiredNonEmptyFields.length === 0) {
     return null;
   }
 
@@ -183,7 +233,7 @@ export function parseMatchPolicy(instruction: string | undefined | null): MatchP
 }
 
 function parseExpectedItemCount(message: string): number | null {
-  const match = message.match(/(\d{1,2})\s*(?:satir|satır|olcu|ölçü|kalem)/i);
+  const match = message.match(/(\d{1,2})\s*(?:satir|satÄ±r|olcu|Ã¶lÃ§Ã¼|kalem)/i);
   if (!match) return null;
   const count = Number(match[1]);
   return Number.isFinite(count) && count > 0 ? count : null;
@@ -363,3 +413,5 @@ export async function commitInstructionPolicy(input: {
 
   return { policyId, activated };
 }
+
+

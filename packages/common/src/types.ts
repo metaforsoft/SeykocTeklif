@@ -46,9 +46,15 @@ export interface MatchInput {
 export interface MatchPolicy {
   stockCodePrefix?: string | null;
   requiredTerms?: string[];
+  requiredStockCodeTerms?: string[];
+  requiredStockNameTerms?: string[];
+  requiredNonEmptyFields?: string[];
   preferredSeries?: string | null;
   preferredTemper?: string | null;
   preferredProductType?: string | null;
+  preferredDim1?: number | null;
+  preferredDim2?: number | null;
+  preferredDim3?: number | null;
 }
 
 export interface RowInstructionSet {
@@ -157,6 +163,23 @@ export interface CandidateRow {
   similarity: number;
 }
 
+export interface ScoreBreakdown {
+  base_score: number;
+  components: {
+    series: number;
+    temper: number;
+    product_type: number;
+    dimensions: number;
+    secondary_dimensions: number;
+    thickness: number;
+    text_similarity: number;
+    stock_family: number;
+    instruction: number;
+    learning: number;
+    ml: number;
+  };
+}
+
 export interface ScoredResult {
   stock_id: number;
   stock_code: string | null;
@@ -168,4 +191,7 @@ export interface ScoredResult {
   temper?: string | null;
   score: number;
   why: string[];
+  hard_rule_pass?: boolean;
+  rule_hits?: string[];
+  score_breakdown?: ScoreBreakdown;
 }

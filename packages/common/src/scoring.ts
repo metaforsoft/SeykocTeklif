@@ -1,4 +1,4 @@
-﻿import { CandidateRow, ExtractedFromInput, ScoredResult } from "./types";
+import { CandidateRow, ExtractedFromInput, ScoreBreakdown, ScoredResult } from "./types";
 
 function toInputDims(extracted: ExtractedFromInput): number[] {
   return [extracted.dim1, extracted.dim2, extracted.dim3].filter((n): n is number => typeof n === "number");
@@ -6,6 +6,25 @@ function toInputDims(extracted: ExtractedFromInput): number[] {
 
 function toCandidateDims(c: CandidateRow): number[] {
   return [c.dim1, c.dim2, c.dim3].filter((n): n is number => typeof n === "number");
+}
+
+function createBreakdown(): ScoreBreakdown {
+  return {
+    base_score: 0,
+    components: {
+      series: 0,
+      temper: 0,
+      product_type: 0,
+      dimensions: 0,
+      secondary_dimensions: 0,
+      thickness: 0,
+      text_similarity: 0,
+      stock_family: 0,
+      instruction: 0,
+      learning: 0,
+      ml: 0
+    }
+  };
 }
 
 function parseMmFromName(name: string | null | undefined): number | null {
@@ -183,11 +202,9 @@ function scoreSecondaryDimensions(
     }
   }
 
-  if (candidate.length < input.length) {
-    if (strictSecondaryDims) {
-      delta -= (input.length - candidate.length) * 10;
-      reasons.push("secondary dimensions incomplete");
-    }
+  if (candidate.length < input.length && strictSecondaryDims) {
+    delta -= (input.length - candidate.length) * 10;
+    reasons.push("secondary dimensions incomplete");
   }
 
   return { delta, reasons };
@@ -203,7 +220,6 @@ function directionalDimScore(input: number[], candidate: number[]): { delta: num
   const b = [...candidate].sort((x, y) => x - y);
   let delta = 0;
 
-  // Kural: olculer mumkunse asagi degil, yukari en yakin degerden secilsin.
   for (let i = 0; i < a.length; i += 1) {
     const gap = b[i] - a[i];
     if (gap < 0) {
@@ -232,6 +248,10 @@ function directionalDimScore(input: number[], candidate: number[]): { delta: num
   return { delta, reasons };
 }
 
+function applyDelta(breakdown: ScoreBreakdown, key: keyof ScoreBreakdown["components"], delta: number): void {
+  breakdown.components[key] += delta;
+}
+
 export function scoreCandidates(extracted: ExtractedFromInput, candidates: CandidateRow[], topK: number): ScoredResult[] {
   const inputDims = toInputDims(extracted);
   const inputThickness = inputDims.length > 0 ? [...inputDims].sort((a, b) => a - b)[0] : null;
@@ -242,29 +262,35 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
   const scored = candidates.map((c) => {
     let score = 0;
     const why: string[] = [];
+    const breakdown = createBreakdown();
     const stockPrefix = getStockPrefix(c.stock_code);
     const shouldUseSecondaryDims = ["ABR", "ALM", "ACT", "AKP", "AKB"].includes(stockPrefix ?? "");
 
     if (extracted.series && c.series === extracted.series) {
       score += 40;
+      applyDelta(breakdown, "series", 40);
       why.push("series exact");
     } else if (extracted.series_group && c.series_group === extracted.series_group) {
       score += 20;
+      applyDelta(breakdown, "series", 20);
       why.push("series group match");
     }
 
     if (extracted.temper && c.temper && extracted.temper === c.temper) {
       score += 25;
+      applyDelta(breakdown, "temper", 25);
       why.push("temper exact");
     }
 
     if (extracted.product_type && c.product_type && extracted.product_type === c.product_type) {
       score += 15;
+      applyDelta(breakdown, "product_type", 15);
       why.push("product type exact");
     }
 
     if (extracted.dim_text && c.dim_text && extracted.dim_text === c.dim_text) {
       score += 25;
+      applyDelta(breakdown, "dimensions", 25);
       why.push("dimensions exact");
     }
 
@@ -273,12 +299,15 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
     if (Number.isFinite(distance)) {
       if (distance <= 3) {
         score += 22;
+        applyDelta(breakdown, "dimensions", 22);
         why.push("dimensions tolerance <=3");
       } else if (distance <= 8) {
         score += 14;
+        applyDelta(breakdown, "dimensions", 14);
         why.push("dimensions tolerance <=8");
       } else if (distance <= 20) {
         score += 6;
+        applyDelta(breakdown, "dimensions", 6);
         why.push("dimensions near");
       }
     }
@@ -286,6 +315,7 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
     const directional = directionalDimScore(inputDims, candDims);
     if (directional.delta !== 0) {
       score += directional.delta;
+      applyDelta(breakdown, "dimensions", directional.delta);
       why.push(...directional.reasons);
     }
 
@@ -299,10 +329,12 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
     if (exactErpCapExists && inputThickness !== null) {
       if (erpCapThickness === null || Math.abs(erpCapThickness - inputThickness) > 0.2) {
         score -= 140;
+        applyDelta(breakdown, "thickness", -140);
         why.push("exact erp cap candidate exists");
       }
     }
 
+    const beforeErpCap = score;
     const afterErpCap = applyThicknessSignal({
       score,
       why,
@@ -316,10 +348,12 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
       belowPenalty: 60
     });
     score = afterErpCap.score;
+    applyDelta(breakdown, "thickness", score - beforeErpCap);
     why.splice(0, why.length, ...afterErpCap.why);
 
     if (inputThickness !== null && erpCapThickness === null) {
       score -= 22;
+      applyDelta(breakdown, "thickness", -22);
       why.push("missing erp cap");
     }
 
@@ -328,19 +362,23 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
     });
     if (secondaryDimensionScore.delta !== 0) {
       score += secondaryDimensionScore.delta;
+      applyDelta(breakdown, "secondary_dimensions", secondaryDimensionScore.delta);
       why.push(...secondaryDimensionScore.reasons);
     }
 
     if (preferAlvByThickness) {
       if (stockPrefix === "ALV") {
         score += 18;
+        applyDelta(breakdown, "stock_family", 18);
         why.push("thin stock prefers ALV");
       } else {
         score -= 6;
+        applyDelta(breakdown, "stock_family", -6);
         why.push("thin stock non-ALV");
       }
     }
 
+    const beforeCode = score;
     const afterCode = applyThicknessSignal({
       score,
       why,
@@ -354,8 +392,10 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
       belowPenalty: 48
     });
     score = afterCode.score;
+    applyDelta(breakdown, "thickness", score - beforeCode);
     why.splice(0, why.length, ...afterCode.why);
 
+    const beforeName = score;
     const afterName = applyThicknessSignal({
       score,
       why,
@@ -369,40 +409,39 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
       belowPenalty: candDims.length === 0 ? 40 : 20
     });
     score = afterName.score;
+    applyDelta(breakdown, "thickness", score - beforeName);
     why.splice(0, why.length, ...afterName.why);
 
-    if (inputThickness !== null && dimensionalThickness !== null && nameThickness !== null) {
-      if (Math.abs(dimensionalThickness - nameThickness) <= 0.2) {
-        score += 8;
-        why.push("name thickness confirms dimensions");
-      }
+    if (inputThickness !== null && dimensionalThickness !== null && nameThickness !== null && Math.abs(dimensionalThickness - nameThickness) <= 0.2) {
+      score += 8;
+      applyDelta(breakdown, "thickness", 8);
+      why.push("name thickness confirms dimensions");
     }
 
-    if (inputThickness !== null && codeThickness !== null && nameThickness !== null) {
-      if (Math.abs(codeThickness - nameThickness) <= 0.2) {
-        score += 10;
-        why.push("code/name thickness aligned");
-      }
+    if (inputThickness !== null && codeThickness !== null && nameThickness !== null && Math.abs(codeThickness - nameThickness) <= 0.2) {
+      score += 10;
+      applyDelta(breakdown, "thickness", 10);
+      why.push("code/name thickness aligned");
     }
 
-    if (inputThickness !== null && erpCapThickness !== null && codeThickness !== null) {
-      if (Math.abs(erpCapThickness - codeThickness) <= 0.2) {
-        score += 8;
-        why.push("erp cap/code aligned");
-      }
+    if (inputThickness !== null && erpCapThickness !== null && codeThickness !== null && Math.abs(erpCapThickness - codeThickness) <= 0.2) {
+      score += 8;
+      applyDelta(breakdown, "thickness", 8);
+      why.push("erp cap/code aligned");
     }
 
-    if (inputThickness !== null && erpCapThickness !== null && nameThickness !== null) {
-      if (Math.abs(erpCapThickness - nameThickness) <= 0.2) {
-        score += 8;
-        why.push("erp cap/name aligned");
-      }
+    if (inputThickness !== null && erpCapThickness !== null && nameThickness !== null && Math.abs(erpCapThickness - nameThickness) <= 0.2) {
+      score += 8;
+      applyDelta(breakdown, "thickness", 8);
+      why.push("erp cap/name aligned");
     }
 
     const trigram = Math.max(0, Math.min(1, c.similarity));
     if (trigram > 0) {
-      score += trigram * 10;
-      why.push(`trigram ${(trigram * 10).toFixed(2)}`);
+      const trigramScore = trigram * 10;
+      score += trigramScore;
+      applyDelta(breakdown, "text_similarity", trigramScore);
+      why.push(`trigram ${trigramScore.toFixed(2)}`);
     }
 
     return {
@@ -415,7 +454,10 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
       series: c.series ?? null,
       temper: c.temper ?? null,
       score: Number(score.toFixed(3)),
-      why
+      why,
+      hard_rule_pass: true,
+      rule_hits: [],
+      score_breakdown: breakdown
     };
   });
 

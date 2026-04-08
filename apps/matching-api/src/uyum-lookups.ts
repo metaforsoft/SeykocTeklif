@@ -226,24 +226,28 @@ limit ${normalizedLimit}`;
       const filters: string[] = [];
       if (normalizedQuery) {
         const pattern = toSqlPattern(normalizedQuery);
-        filters.push(`fi.name ilike '${pattern}'`);
+        filters.push(`tt.transport_type_code ilike '${pattern}'`);
+        filters.push(`tt.description ilike '${pattern}'`);
       }
-      const whereSql = filters.length > 0 ? `where ${filters.join(" and ")}` : "";
+      const whereSql = filters.length > 0 ? `where (${filters.join(" or ")})` : "";
       return `select
-fi.name
-from FTMD_INCOTERMS fi
+tt.transport_type_code,
+tt.description
+from PSMD_TRANSPORT_TYPE tt
 ${whereSql}
-order by fi.name
+order by tt.transport_type_code, tt.description
 limit ${normalizedLimit}`;
     },
     mapRow: (row) => {
-      const name = readStringField(row, ["name"]);
-      if (!name) return null;
+      const code = readStringField(row, ["transport_type_code"]);
+      const description = readStringField(row, ["description"]);
+      if (!code) return null;
       return {
-        value: name,
-        label: name,
+        value: code,
+        label: [code, description].filter(Boolean).join(" "),
         payload: {
-          name
+          code,
+          description
         }
       };
     }
@@ -398,16 +402,17 @@ export async function postUyumRequest(path: string, body: unknown): Promise<Uyum
   }
 
   if (!response.ok) {
-    const validationText = Array.isArray(data.responseException?.validationErrors)
-      ? data.responseException?.validationErrors
-          ?.map((item) => [item.field, item.message].filter(Boolean).join(" "))
+    const validationItems = Array.isArray(data.responseException?.validationErrors)
+      ? data.responseException.validationErrors
+          .map((item) => [item.field, item.message].filter(Boolean).join(": "))
           .filter(Boolean)
-          .join(" | ")
-      : "";
-    const detail = data.responseException?.exceptionMessage
-      ?? validationText
-      ?? data.message
-      ?? rawBody.slice(0, 300);
+      : [];
+    const baseMessage = data.responseException?.exceptionMessage
+      || data.message
+      || rawBody.slice(0, 300);
+    const detail = validationItems.length > 0
+      ? `${baseMessage}\n\nDoğrulama detayları:\n- ${validationItems.join("\n- ")}`
+      : baseMessage;
     throw new Error(`Uyum lookup HTTP ${response.status}: ${detail}`);
   }
 

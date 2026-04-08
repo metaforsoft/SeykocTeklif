@@ -194,6 +194,80 @@ async function upsertFeatures(rows: StockMasterRow[]): Promise<void> {
   }
 }
 
+function stockFamilyFromCode(code: string | null | undefined): string | null {
+  if (!code) return null;
+  const prefix = String(code).trim().split(".")[0]?.trim().toUpperCase() ?? "";
+  return prefix || null;
+}
+
+async function upsertCanonicalFeatures(rows: StockMasterRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const client = await matchPool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const r of rows) {
+      const f = extractFeaturesFromStock(r);
+      const dims = [f.dim1, f.dim2, f.dim3].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+      const sortedDims = [...dims].sort((a, b) => a - b);
+      await client.query(
+        `INSERT INTO canonical_stock_features(
+           stock_id, stock_family, product_type, series, series_group, temper,
+           thickness, width, length, height, diameter, unit, raw_attributes_json, search_text, schema_version, normalized_at
+         )
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,1,NOW())
+         ON CONFLICT(stock_id) DO UPDATE SET
+           stock_family=EXCLUDED.stock_family,
+           product_type=EXCLUDED.product_type,
+           series=EXCLUDED.series,
+           series_group=EXCLUDED.series_group,
+           temper=EXCLUDED.temper,
+           thickness=EXCLUDED.thickness,
+           width=EXCLUDED.width,
+           length=EXCLUDED.length,
+           height=EXCLUDED.height,
+           diameter=EXCLUDED.diameter,
+           unit=EXCLUDED.unit,
+           raw_attributes_json=EXCLUDED.raw_attributes_json,
+           search_text=EXCLUDED.search_text,
+           schema_version=EXCLUDED.schema_version,
+           normalized_at=EXCLUDED.normalized_at`,
+        [
+          r.stock_id,
+          stockFamilyFromCode(r.stock_code),
+          f.product_type,
+          f.series,
+          f.series_group,
+          f.temper,
+          sortedDims[0] ?? null,
+          sortedDims[1] ?? null,
+          sortedDims[2] ?? null,
+          r.erp_yukseklik ?? null,
+          r.erp_cap ?? null,
+          r.birim ?? null,
+          JSON.stringify({
+            stock_code: r.stock_code,
+            stock_name: r.stock_name,
+            erp_en: r.erp_en ?? null,
+            erp_boy: r.erp_boy ?? null,
+            erp_yukseklik: r.erp_yukseklik ?? null,
+            erp_cap: r.erp_cap ?? null,
+            cinsi: r.cinsi ?? null,
+            alasim: r.alasim ?? null,
+            tamper: r.tamper ?? null
+          }),
+          f.search_text
+        ]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 async function runSync(): Promise<void> {
   const started = Date.now();
   const hasIncremental = env.erp.columns.updatedAt && env.erp.columns.updatedAt.trim().length > 0;
@@ -222,6 +296,7 @@ async function runSync(): Promise<void> {
 
   await upsertStockMaster(mapped);
   await upsertFeatures(mapped);
+  await upsertCanonicalFeatures(mapped);
 
   if (!hasIncremental) {
     await markInactiveMissing(mapped.map((m) => m.stock_id));

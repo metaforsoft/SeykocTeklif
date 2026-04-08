@@ -98,7 +98,16 @@ export function applyMlRerank(results: ScoredResult[], topK: number): ScoredResu
     return {
       ...r,
       score: Number((r.score + boost).toFixed(3)),
-      why: [...r.why, `ml_olasilik ${(p * 100).toFixed(1)}%`]
+      why: [...r.why, `ml_olasilik ${(p * 100).toFixed(1)}%`],
+      score_breakdown: r.score_breakdown
+        ? {
+          ...r.score_breakdown,
+          components: {
+            ...r.score_breakdown.components,
+            ml: r.score_breakdown.components.ml + boost
+          }
+        }
+        : r.score_breakdown
     };
   });
 
