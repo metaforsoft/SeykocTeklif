@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="tr">
 <head>
   <meta charset="UTF-8" />
@@ -93,6 +93,28 @@
                 <option value="">Seçiniz</option>
               </select>
             </label>
+            <label>
+              <span>Depo</span>
+              <select id="offerMetaWarehouse">
+                <option value="">Seçiniz</option>
+              </select>
+            </label>
+            <label>
+              <span>Ödeme Planı</span>
+              <select id="offerMetaPaymentPlan">
+                <option value="">Seçiniz</option>
+              </select>
+            </label>
+            <label>
+              <span>Teslim Şekli</span>
+              <select id="offerMetaIncoterm">
+                <option value="">Seçiniz</option>
+              </select>
+            </label>
+            <label>
+              <span>Teslim Tarihi</span>
+              <input id="offerMetaDeliveryDate" type="date" />
+            </label>
             <label class="offer-meta-description">
               <span>Açıklama</span>
               <textarea id="offerMetaDescription" rows="3" placeholder="Teklif ile ilgili notları girin..."></textarea>
@@ -105,21 +127,27 @@
           <thead>
             <tr>
               <th>#</th>
-              <th>Kalınlık</th>
-              <th>En</th>
-              <th>Boy</th>
+              <th><span class="table-head-copy">Kalınlık<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="dimKalinlik" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th><span class="table-head-copy">En<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="dimEn" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th><span class="table-head-copy">Boy<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="dimBoy" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th>Alaşım</th>
+              <th>Tamper</th>
               <th>Stok Kodu</th>
               <th>Stok Adı</th>
               <th>Seç</th>
               <th>Birim</th>
-              <th>Kesim Var</th>
-              <th>Menşei</th>
-              <th>Adet</th>
+              <th><span class="table-head-copy">Kesim Var<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="kesimDurumu" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th><span class="table-head-copy">Menşei<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="mensei" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th><span class="table-head-copy">Adet<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="quantity" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th><span class="table-head-copy">Kg<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="kg" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th><span class="table-head-copy">Talaş Mik.<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="talasMik" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th><span class="table-head-copy">Müşteri No<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="musteriNo" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
+              <th><span class="table-head-copy">Müşteri Parça No<button type="button" class="copy-col-btn" data-k="copy-first-row" data-field="musteriParcaNo" title="İlk satırdan kopyala" aria-label="İlk satırdan kopyala">⧉</button></span></th>
               <th>İşlem</th>
             </tr>
           </thead>
           <tbody id="resultBody">
-            <tr><td colspan="12" class="muted center">Henüz analiz yapılmadı.</td></tr>
+            <tr><td colspan="18" class="muted center">Henüz analiz yapılmadı.</td></tr>
           </tbody>
         </table>
       </div>
@@ -140,25 +168,22 @@
         <button id="closeStockModalBtn" type="button" class="icon-btn">Kapat</button>
       </div>
       <div class="modal-body">
-        <input id="allStockSearch" type="text" placeholder="Stok kodu, adı, seri, temper, ölçü ara..." />
+        <input id="allStockSearch" type="text" placeholder="Stok kodu, adı, cinsi, alaşım, tamper ara..." />
         <div class="modal-table-wrap">
           <table class="modal-table">
             <thead>
               <tr>
                 <th>Kod</th>
                 <th>Ad</th>
-                <th>Ad 2</th>
                 <th>Birim</th>
-                <th>ERP En</th>
-                <th>ERP Boy</th>
-                <th>ERP Yukseklik</th>
-                <th>ERP Cap</th>
-                <th>Seri</th>
-                <th>Temper</th>
-              <th>Ölçü</th>
-                <th>Tip</th>
-                <th>Kategori</th>
-              <th>Açıklama</th>
+                <th>En</th>
+                <th>Boy</th>
+                <th>Yükseklik</th>
+                <th>Çap</th>
+                <th>Özgül Ağırlık</th>
+                <th>Cinsi</th>
+                <th>Alaşım</th>
+                <th>Tamper</th>
               </tr>
             </thead>
             <tbody id="allStockTableBody"></tbody>
@@ -203,3 +228,5 @@
   <script src="/ui/app.js"></script>
 </body>
 </html>
+
+

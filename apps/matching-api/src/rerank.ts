@@ -28,12 +28,28 @@ export async function rerankResults(inputText: string, results: ScoredResult[], 
     const merged = data.results.map((item) => {
       const base = baseMap.get(Number(item.stock_id));
       if (!base) return item;
+      const richItem = item as ScoredResult & {
+        alasim?: string | null;
+        tamper?: string | null;
+        series?: string | null;
+        temper?: string | null;
+      };
+      const richBase = base as ScoredResult & {
+        alasim?: string | null;
+        tamper?: string | null;
+        series?: string | null;
+        temper?: string | null;
+      };
       return {
         ...base,
         ...item,
         stock_code: item.stock_code ?? base.stock_code ?? null,
         stock_name: item.stock_name ?? base.stock_name ?? null,
-        birim: item.birim ?? base.birim ?? null
+        birim: item.birim ?? base.birim ?? null,
+        alasim: richItem.alasim ?? richBase.alasim ?? null,
+        tamper: richItem.tamper ?? richBase.tamper ?? null,
+        series: richItem.series ?? richBase.series ?? null,
+        temper: richItem.temper ?? richBase.temper ?? null
       };
     });
 

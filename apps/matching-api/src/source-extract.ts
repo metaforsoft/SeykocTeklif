@@ -5,6 +5,7 @@ import * as XLSX from "xlsx";
 import { ParsedOrderDocument, ParsedOrderLine, parseOrderDocument } from "@smp/common";
 import { annotateMethod, extractWithGoogleVision, extractWithLlmFallback, extractWithLlmImageFallback, parserNeedsFallback } from "./ai-extract";
 import { buildFingerprint, findBestExtractionProfile } from "./extraction-learning";
+import { findBestInstructionPolicy } from "./instruction-policies";
 
 type SupportedSourceType = ParsedOrderDocument["source_type"];
 
@@ -400,6 +401,29 @@ function parseExpectedItemCount(instruction: string | null | undefined): number 
   return Number.isFinite(count) && count > 0 ? count : null;
 }
 
+function buildLearningMeta(args: {
+  fingerprint: ReturnType<typeof buildFingerprint>;
+  userInstruction: string | null;
+  effectiveInstruction: string | null;
+  matchedProfile: Awaited<ReturnType<typeof findBestExtractionProfile>>;
+  matchedInstructionPolicy: Awaited<ReturnType<typeof findBestInstructionPolicy>>;
+}) {
+  return {
+    fingerprint_text: args.fingerprint.text,
+    fingerprint_hash: args.fingerprint.hash,
+    fingerprint_json: args.fingerprint.json,
+    user_instruction: args.userInstruction,
+    effective_instruction: args.effectiveInstruction,
+    applied_match_instruction: args.matchedProfile?.match_instruction ?? null,
+    applied_match_policy: args.matchedInstructionPolicy?.policy_json?.matchPolicy ?? null,
+    applied_profile_id: args.matchedProfile?.id ?? null,
+    applied_profile_name: args.matchedProfile?.name ?? null,
+    applied_instruction_policy_id: args.matchedInstructionPolicy?.id ?? null,
+    applied_instruction_policy_name: args.matchedInstructionPolicy?.name ?? null,
+    row_defaults: args.matchedInstructionPolicy?.policy_json?.rowDefaults ?? null
+  };
+}
+
 export async function extractSourceDocument(input: {
   rawText?: string;
   fileName?: string;
@@ -417,7 +441,11 @@ export async function extractSourceDocument(input: {
       sampleText: normalizedText
     });
     const matchedProfile = normalizedInstruction ? null : await findBestExtractionProfile(fingerprint);
-    const effectiveInstruction = normalizedInstruction ?? matchedProfile?.instruction_text ?? null;
+    const matchedInstructionPolicy = normalizedInstruction ? null : await findBestInstructionPolicy(fingerprint);
+    const effectiveInstruction = normalizedInstruction
+      ?? matchedInstructionPolicy?.policy_json?.extractionPrompt
+      ?? matchedProfile?.instruction_text
+      ?? null;
     let parsed = annotateMethod(parseOrderDocument(normalizedText, "plain_text"), "plain_text");
     if (effectiveInstruction && parsed.items.length === 0) {
       const llm = await extractWithLlmFallback(normalizedText, "plain_text", effectiveInstruction);
@@ -425,15 +453,13 @@ export async function extractSourceDocument(input: {
     }
     return {
       ...parsed,
-      learning: {
-        fingerprint_text: fingerprint.text,
-        fingerprint_json: fingerprint.json,
-        user_instruction: normalizedInstruction,
-        effective_instruction: effectiveInstruction,
-        applied_match_instruction: matchedProfile?.match_instruction ?? null,
-        applied_profile_id: matchedProfile?.id ?? null,
-        applied_profile_name: matchedProfile?.name ?? null
-      },
+      learning: buildLearningMeta({
+        fingerprint,
+        userInstruction: normalizedInstruction,
+        effectiveInstruction,
+        matchedProfile,
+        matchedInstructionPolicy
+      }),
       debug: {
         ...buildDebugMeta(input),
         fallback_attempted: false,
@@ -466,20 +492,22 @@ export async function extractSourceDocument(input: {
       sampleText: headerRows.flat().join(" ")
     });
     const matchedProfile = normalizedInstruction ? null : await findBestExtractionProfile(fingerprint);
-    const effectiveInstruction = normalizedInstruction ?? matchedProfile?.instruction_text ?? null;
+    const matchedInstructionPolicy = normalizedInstruction ? null : await findBestInstructionPolicy(fingerprint);
+    const effectiveInstruction = normalizedInstruction
+      ?? matchedInstructionPolicy?.policy_json?.extractionPrompt
+      ?? matchedProfile?.instruction_text
+      ?? null;
     const excelDoc = buildExcelDocument(workbook, effectiveInstruction);
     if (excelDoc) {
       return {
         ...excelDoc,
-        learning: {
-          fingerprint_text: fingerprint.text,
-          fingerprint_json: fingerprint.json,
-          user_instruction: normalizedInstruction,
-          effective_instruction: effectiveInstruction,
-          applied_match_instruction: matchedProfile?.match_instruction ?? null,
-          applied_profile_id: matchedProfile?.id ?? null,
-          applied_profile_name: matchedProfile?.name ?? null
-        },
+        learning: buildLearningMeta({
+          fingerprint,
+          userInstruction: normalizedInstruction,
+          effectiveInstruction,
+          matchedProfile,
+          matchedInstructionPolicy
+        }),
         debug: {
           ...buildDebugMeta(input),
           fallback_attempted: false,
@@ -498,7 +526,11 @@ export async function extractSourceDocument(input: {
       mimeType: input.mimeType
     });
     const matchedProfile = normalizedInstruction ? null : await findBestExtractionProfile(fingerprint);
-    const effectiveInstruction = normalizedInstruction ?? matchedProfile?.instruction_text ?? null;
+    const matchedInstructionPolicy = normalizedInstruction ? null : await findBestInstructionPolicy(fingerprint);
+    const effectiveInstruction = normalizedInstruction
+      ?? matchedInstructionPolicy?.policy_json?.extractionPrompt
+      ?? matchedProfile?.instruction_text
+      ?? null;
     const extracted = await extractTextFromImageBuffer(buffer, input.fileName, input.mimeType);
     const normalized = cleanupImageText(extracted.text);
     let parsed = annotateMethod(parseOrderDocument(normalized, "image"), extracted.method);
@@ -563,15 +595,13 @@ export async function extractSourceDocument(input: {
 
     return {
       ...parsed,
-      learning: {
-        fingerprint_text: fingerprint.text,
-        fingerprint_json: fingerprint.json,
-        user_instruction: normalizedInstruction,
-        effective_instruction: effectiveInstruction,
-        applied_match_instruction: matchedProfile?.match_instruction ?? null,
-        applied_profile_id: matchedProfile?.id ?? null,
-        applied_profile_name: matchedProfile?.name ?? null
-      },
+      learning: buildLearningMeta({
+        fingerprint,
+        userInstruction: normalizedInstruction,
+        effectiveInstruction,
+        matchedProfile,
+        matchedInstructionPolicy
+      }),
       debug: {
         ...buildDebugMeta(input),
         fallback_attempted: fallbackAttempted,
@@ -598,7 +628,11 @@ export async function extractSourceDocument(input: {
     sampleText: normalized
   });
   const matchedProfile = normalizedInstruction ? null : await findBestExtractionProfile(fingerprint);
-  const effectiveInstruction = normalizedInstruction ?? matchedProfile?.instruction_text ?? null;
+  const matchedInstructionPolicy = normalizedInstruction ? null : await findBestInstructionPolicy(fingerprint);
+  const effectiveInstruction = normalizedInstruction
+    ?? matchedInstructionPolicy?.policy_json?.extractionPrompt
+    ?? matchedProfile?.instruction_text
+    ?? null;
   let parsed = annotateMethod(parseOrderDocument(normalized, sourceType), sourceType);
   if (effectiveInstruction && (parsed.items.length === 0 || sourceType === "docx" || sourceType === "pdf_text" || normalizedInstruction)) {
     const llm = await extractWithLlmFallback(normalized, sourceType, effectiveInstruction);
@@ -608,15 +642,13 @@ export async function extractSourceDocument(input: {
   }
   return {
     ...parsed,
-    learning: {
-      fingerprint_text: fingerprint.text,
-      fingerprint_json: fingerprint.json,
-      user_instruction: normalizedInstruction,
-      effective_instruction: effectiveInstruction,
-      applied_match_instruction: matchedProfile?.match_instruction ?? null,
-      applied_profile_id: matchedProfile?.id ?? null,
-      applied_profile_name: matchedProfile?.name ?? null
-    },
+    learning: buildLearningMeta({
+      fingerprint,
+      userInstruction: normalizedInstruction,
+      effectiveInstruction,
+      matchedProfile,
+      matchedInstructionPolicy
+    }),
     debug: {
       ...buildDebugMeta(input),
       fallback_attempted: false,

@@ -15,6 +15,10 @@ interface ErpRawRow {
   erp_boy: number | null;
   erp_yukseklik: number | null;
   erp_cap: number | null;
+  specific_gravity: number | null;
+  cinsi: string | null;
+  alasim: string | null;
+  tamper: string | null;
   updated_at: Date | null;
 }
 
@@ -36,7 +40,11 @@ function selectClause(): string {
     numOrNull(c.en, "erp_en"),
     numOrNull(c.boy, "erp_boy"),
     numOrNull(c.yukseklik, "erp_yukseklik"),
-    numOrNull(c.cap, "erp_cap")
+    numOrNull(c.cap, "erp_cap"),
+    numOrNull(c.specificGravity, "specific_gravity"),
+    colOrNull(c.cinsi, "cinsi"),
+    colOrNull(c.alasim, "alasim"),
+    colOrNull(c.tamper, "tamper")
   ];
 
   if (c.updatedAt && c.updatedAt.trim().length > 0) {
@@ -92,8 +100,12 @@ async function upsertStockMaster(rows: StockMasterRow[]): Promise<void> {
     await client.query("BEGIN");
     for (const r of rows) {
       await client.query(
-        `INSERT INTO stock_master(stock_id, stock_code, stock_name, stock_name2, description, category1, birim, erp_en, erp_boy, erp_yukseklik, erp_cap, updated_at, is_active)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,TRUE)
+        `INSERT INTO stock_master(
+           stock_id, stock_code, stock_name, stock_name2, description, category1, birim,
+           erp_en, erp_boy, erp_yukseklik, erp_cap, specific_gravity, cinsi, alasim, tamper,
+           updated_at, is_active
+         )
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,TRUE)
          ON CONFLICT(stock_id) DO UPDATE SET
            stock_code=EXCLUDED.stock_code,
            stock_name=EXCLUDED.stock_name,
@@ -104,9 +116,13 @@ async function upsertStockMaster(rows: StockMasterRow[]): Promise<void> {
            erp_en=EXCLUDED.erp_en,
            erp_boy=EXCLUDED.erp_boy,
            erp_yukseklik=EXCLUDED.erp_yukseklik,
-           erp_cap=EXCLUDED.erp_cap,
-           updated_at=EXCLUDED.updated_at,
-            is_active=TRUE`,
+            erp_cap=EXCLUDED.erp_cap,
+            specific_gravity=EXCLUDED.specific_gravity,
+            cinsi=EXCLUDED.cinsi,
+            alasim=EXCLUDED.alasim,
+            tamper=EXCLUDED.tamper,
+            updated_at=EXCLUDED.updated_at,
+             is_active=TRUE`,
         [
           r.stock_id,
           r.stock_code,
@@ -119,6 +135,10 @@ async function upsertStockMaster(rows: StockMasterRow[]): Promise<void> {
           r.erp_boy ?? null,
           r.erp_yukseklik ?? null,
           r.erp_cap ?? null,
+          r.specific_gravity ?? null,
+          r.cinsi ?? null,
+          r.alasim ?? null,
+          r.tamper ?? null,
           r.updated_at
         ]
       );
@@ -192,6 +212,10 @@ async function runSync(): Promise<void> {
     erp_boy: r.erp_boy,
     erp_yukseklik: r.erp_yukseklik,
     erp_cap: r.erp_cap,
+    specific_gravity: r.specific_gravity,
+    cinsi: r.cinsi,
+    alasim: r.alasim,
+    tamper: r.tamper,
     updated_at: r.updated_at ? new Date(r.updated_at) : null,
     is_active: true
   }));

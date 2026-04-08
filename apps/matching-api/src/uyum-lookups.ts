@@ -153,6 +153,100 @@ limit ${normalizedLimit}`;
         }
       };
     }
+  },
+  warehouses: {
+    buildSql: ({ query, limit }) => {
+      const normalizedQuery = normalizeLookupQuery(query);
+      const normalizedLimit = normalizeLookupLimit(limit, 30, 100);
+      const filters = [
+        "who.ispassive=0"
+      ];
+      if (normalizedQuery) {
+        const pattern = toSqlPattern(normalizedQuery);
+        filters.push(`(who.whouse_code ilike '${pattern}' or coalesce(who.description, '') ilike '${pattern}')`);
+      }
+      return `select
+who.whouse_code,
+who.description
+from invd_whouse who
+where ${filters.join(" and ")}
+order by who.whouse_code
+limit ${normalizedLimit}`;
+    },
+    mapRow: (row) => {
+      const code = readStringField(row, ["whouse_code"]);
+      const description = readStringField(row, ["description"]);
+      if (!code) return null;
+      return {
+        value: code,
+        label: [code, description].filter(Boolean).join(" "),
+        payload: {
+          code,
+          description
+        }
+      };
+    }
+  },
+  "payment-plans": {
+    buildSql: ({ query, limit }) => {
+      const normalizedQuery = normalizeLookupQuery(query);
+      const normalizedLimit = normalizeLookupLimit(limit, 30, 100);
+      const filters: string[] = [];
+      if (normalizedQuery) {
+        const pattern = toSqlPattern(normalizedQuery);
+        filters.push(`(pc.payment_plan_code ilike '${pattern}' or coalesce(pc.description, '') ilike '${pattern}')`);
+      }
+      const whereSql = filters.length > 0 ? `where ${filters.join(" and ")}` : "";
+      return `select
+pc.payment_plan_code,
+pc.description
+from FIND_PAYMENT_PLAN pc
+${whereSql}
+order by pc.payment_plan_code
+limit ${normalizedLimit}`;
+    },
+    mapRow: (row) => {
+      const code = readStringField(row, ["payment_plan_code"]);
+      const description = readStringField(row, ["description"]);
+      if (!code) return null;
+      return {
+        value: code,
+        label: [code, description].filter(Boolean).join(" "),
+        payload: {
+          code,
+          description
+        }
+      };
+    }
+  },
+  incoterms: {
+    buildSql: ({ query, limit }) => {
+      const normalizedQuery = normalizeLookupQuery(query);
+      const normalizedLimit = normalizeLookupLimit(limit, 30, 100);
+      const filters: string[] = [];
+      if (normalizedQuery) {
+        const pattern = toSqlPattern(normalizedQuery);
+        filters.push(`fi.name ilike '${pattern}'`);
+      }
+      const whereSql = filters.length > 0 ? `where ${filters.join(" and ")}` : "";
+      return `select
+fi.name
+from FTMD_INCOTERMS fi
+${whereSql}
+order by fi.name
+limit ${normalizedLimit}`;
+    },
+    mapRow: (row) => {
+      const name = readStringField(row, ["name"]);
+      if (!name) return null;
+      return {
+        value: name,
+        label: name,
+        payload: {
+          name
+        }
+      };
+    }
   }
 };
 

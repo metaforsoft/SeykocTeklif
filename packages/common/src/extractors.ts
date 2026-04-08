@@ -82,15 +82,24 @@ function seriesGroup(series: string | null): string | null {
 }
 
 export function buildSearchText(row: StockMasterRow): string {
-  const raw = [row.stock_code, row.stock_name, row.stock_name2, row.description, row.category1].filter(Boolean).join(" ");
+  const raw = [
+    row.stock_code,
+    row.stock_name,
+    row.stock_name2,
+    row.description,
+    row.category1,
+    row.cinsi,
+    row.alasim,
+    row.tamper
+  ].filter(Boolean).join(" ");
   return normalizeText(raw);
 }
 
 export function extractFeaturesFromStock(row: StockMasterRow): ExtractedFeatures {
   const text = buildSearchText(row);
-  const series = detectSeries(text);
-  const temper = detectTemper(text);
-  const product_type = detectProductType(text);
+  const series = row.alasim ? String(row.alasim).trim() || null : detectSeries(text);
+  const temper = row.tamper ? String(row.tamper).trim().toUpperCase() || null : detectTemper(text);
+  const product_type = row.cinsi ? String(row.cinsi).trim().toUpperCase() || null : detectProductType(text);
   const dims = detectDimensions(text);
   const erpDims = [row.erp_en, row.erp_boy, row.erp_yukseklik, row.erp_cap]
     .filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0);

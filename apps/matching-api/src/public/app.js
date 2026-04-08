@@ -52,6 +52,10 @@ const offerMetaDateEl = el("offerMetaDate");
 const offerMetaMovementCodeEl = el("offerMetaMovementCode");
 const offerMetaCustomerEl = el("offerMetaCustomer");
 const offerMetaRepresentativeEl = el("offerMetaRepresentative");
+const offerMetaWarehouseEl = el("offerMetaWarehouse");
+const offerMetaPaymentPlanEl = el("offerMetaPaymentPlan");
+const offerMetaIncotermEl = el("offerMetaIncoterm");
+const offerMetaDeliveryDateEl = el("offerMetaDeliveryDate");
 const offerMetaDescriptionEl = el("offerMetaDescription");
 
 let sourceMode = "text";
@@ -64,6 +68,8 @@ let modalSelectedStockId = null;
 let offerDraftId = null;
 let instructionDrawerOpen = false;
 let pendingChatLearning = null;
+let activeMatchPolicy = null;
+let activeRowDefaults = null;
 let currentMatchedOfferId = null;
 let offerMetaOpen = false;
 let matchedOfferLocked = false;
@@ -114,6 +120,14 @@ function currentInstruction() {
 
 function currentMatchInstruction() {
   return matchInstructionTextEl?.value?.trim() || "";
+}
+
+function currentMatchPolicy() {
+  return activeMatchPolicy || extractedDoc?.learning?.applied_match_policy || null;
+}
+
+function currentRowDefaults() {
+  return activeRowDefaults || extractedDoc?.learning?.row_defaults || null;
 }
 
 function extractInstructionSet(text, options = {}) {
@@ -345,6 +359,10 @@ function setMatchedOfferLocked(next) {
     offerMetaMovementCodeEl,
     offerMetaCustomerEl,
     offerMetaRepresentativeEl,
+    offerMetaWarehouseEl,
+    offerMetaPaymentPlanEl,
+    offerMetaIncotermEl,
+    offerMetaDeliveryDateEl,
     offerMetaDescriptionEl
   ].forEach((control) => {
     if (control) {
@@ -358,6 +376,99 @@ function setMatchedOfferLocked(next) {
 
   resultBodyEl?.querySelectorAll("input, select, button").forEach((control) => {
     control.disabled = matchedOfferLocked;
+  });
+
+  document.querySelectorAll("[data-k='copy-first-row']").forEach((button) => {
+    button.disabled = matchedOfferLocked;
+  });
+}
+
+function copyFirstRowValue(field) {
+  if (matchedOfferLocked) return;
+  if (!Array.isArray(rows) || rows.length < 2) return;
+
+  const firstRow = rows[0];
+  const firstSelected = selectedCandidate(firstRow);
+
+  for (let index = 1; index < rows.length; index += 1) {
+    const row = rows[index];
+    switch (field) {
+      case "dimKalinlik":
+        row.dimKalinlik = firstRow.dimKalinlik ?? null;
+        row.offer_kalinlikCap = row.dimKalinlik;
+        break;
+      case "dimEn":
+        row.dimEn = firstRow.dimEn ?? null;
+        row.offer_enEtKal = row.dimEn;
+        break;
+      case "dimBoy":
+        row.dimBoy = firstRow.dimBoy ?? null;
+        row.offer_boy = row.dimBoy;
+        break;
+      case "kesimDurumu":
+        row.kesimDurumu = firstRow.kesimDurumu || "Kesim Var";
+        break;
+      case "mensei":
+        row.mensei = firstRow.mensei || "İTHAL";
+        break;
+      case "quantity":
+        row.quantity = firstRow.quantity ?? null;
+        row.offer_adet = row.quantity || row.offer_adet || null;
+        break;
+      case "kg":
+        row.kg = firstRow.kg ?? null;
+        break;
+      case "talasMik":
+        row.talasMik = firstRow.talasMik ?? null;
+        break;
+      case "musteriNo":
+        row.musteriNo = firstRow.musteriNo ?? "";
+        break;
+      case "musteriParcaNo":
+        row.musteriParcaNo = firstRow.musteriParcaNo ?? "";
+        break;
+      case "selected_stock_id":
+        row.selected_stock_id = firstRow.selected_stock_id ?? null;
+        row.selected_score = firstRow.selected_score ?? null;
+        if (firstSelected) {
+          const existing = Array.isArray(row.candidates)
+            ? row.candidates.find((candidate) => Number(candidate.stock_id) === Number(firstSelected.stock_id))
+            : null;
+          if (!existing) {
+            row.candidates = [firstSelected, ...(Array.isArray(row.candidates) ? row.candidates : [])];
+          }
+          if (!row.offer_manuelStockAdi) {
+            row.offer_manuelStockAdi = firstSelected.stock_name || "";
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  const labels = {
+    dimKalinlik: "Kalınlık",
+    dimEn: "En",
+    dimBoy: "Boy",
+    kesimDurumu: "Kesim Durumu",
+    mensei: "Menşei",
+    quantity: "Adet",
+    kg: "Kg",
+    talasMik: "Talaş Mik.",
+    musteriNo: "Müşteri No",
+    musteriParcaNo: "Müşteri Parça No",
+    selected_stock_id: "Stok Kodu"
+  };
+  renderTable();
+  saveStatusEl.textContent = `İlk satırdaki ${labels[field] || field} değeri tüm satırlara uygulandı.`;
+}
+
+function bindHeaderCopyControls() {
+  document.querySelectorAll("[data-k='copy-first-row']").forEach((button) => {
+    button.addEventListener("click", () => {
+      copyFirstRowValue(String(button.dataset.field || "").trim());
+    });
   });
 }
 
@@ -520,9 +631,30 @@ function initializeOfferMetaPanel() {
     minChars: 1,
     limit: 30
   });
+  setupLookupPicker(offerMetaWarehouseEl, {
+    lookupKey: "warehouses",
+    placeholder: "Depo kodu veya aciklama yazarak ara...",
+    minChars: 0,
+    limit: 30
+  });
+  setupLookupPicker(offerMetaPaymentPlanEl, {
+    lookupKey: "payment-plans",
+    placeholder: "Plan kodu veya aciklama yazarak ara...",
+    minChars: 0,
+    limit: 30
+  });
+  setupLookupPicker(offerMetaIncotermEl, {
+    lookupKey: "incoterms",
+    placeholder: "Teslim sekli yazarak ara...",
+    minChars: 0,
+    limit: 30
+  });
 
   if (offerMetaDateEl && !offerMetaDateEl.value) {
     offerMetaDateEl.value = new Date().toISOString().slice(0, 10);
+  }
+  if (offerMetaDeliveryDateEl && !offerMetaDeliveryDateEl.value) {
+    offerMetaDeliveryDateEl.value = "";
   }
 
   offerMetaToggleBtnEl?.addEventListener("click", () => {
@@ -583,58 +715,47 @@ function currentSourceName() {
   return sourceMode === "doc" ? "Doküman girdisi" : "Metin girdisi";
 }
 
-async function ensureChatProfileSavedForLearning(message, doc) {
-  if (!doc) return null;
-  if (doc.learning?.applied_profile_id) {
-    return {
-      profileName: doc.learning.applied_profile_name || (profileNameEl?.value?.trim() || ""),
-      profileId: Number(doc.learning.applied_profile_id)
-    };
-  }
-
-  const profileName = buildAutoProfileName(message);
-  const sampleName = currentSampleName();
-  const result = await api("/profiles/save", "POST", {
-    profileName,
-    userInstruction: message,
-    matchInstruction: message,
-    extractedDoc: doc,
-    sampleName
-  });
-
-  if (!doc.learning) doc.learning = {};
-  doc.learning.user_instruction = message;
-  doc.learning.effective_instruction = message;
-  doc.learning.applied_match_instruction = message;
-  doc.learning.applied_profile_id = Number(result.profileId);
-  doc.learning.applied_profile_name = profileName;
-
-  if (profileNameEl) profileNameEl.value = profileName;
-  return { profileName, profileId: Number(result.profileId) };
+function mergeRowDefaults(nextDefaults) {
+  if (!nextDefaults) return;
+  activeRowDefaults = {
+    ...(activeRowDefaults || {}),
+    ...nextDefaults
+  };
 }
 
 async function rerunMatchingByInstruction(message) {
-  if (instructionTextEl) instructionTextEl.value = message;
-  if (matchInstructionTextEl) {
-    matchInstructionTextEl.value = message;
+  const response = await api("/instructions/plan", "POST", {
+    message,
+    rowCount: rows.length,
+    sourceMode
+  });
+  const plan = response.plan || {};
+
+  if (plan.extractionPrompt && instructionTextEl) {
+    instructionTextEl.value = plan.extractionPrompt;
   }
-  const directEdit = isDirectEditCommand(message) && rows.length > 0;
-  appendInstructionMessage("assistant", directEdit
-    ? "Talimat alındı. Mevcut satırlar üzerinde alan güncellemesi uygulanıyor..."
-    : "Talimat alındı. Analiz ve eşleştirme birlikte yenileniyor...");
+  if (plan.extractionPrompt && matchInstructionTextEl) {
+    matchInstructionTextEl.value = plan.extractionPrompt;
+  }
+  if (plan.matchPolicy) {
+    activeMatchPolicy = plan.matchPolicy;
+  }
+  if (plan.rowDefaults) {
+    mergeRowDefaults(plan.rowDefaults);
+  }
+
+  const willRerun = Boolean(plan.needsRematch || plan.needsReextract);
+  appendInstructionMessage("assistant", willRerun
+    ? "Talimat alındı. Yeniden analiz ve eşleştirme uygulanıyor..."
+    : "Talimat alındı. Mevcut satırlar üzerinde güncelleme uygulanıyor...");
 
   try {
-    saveStatusEl.textContent = "ERP'ye gönderiliyor...";
-    setAnalysisModal(true, "Teklif ERP sistemine gönderiliyor...", "ERP'ye Gönderiliyor...");
+    saveStatusEl.textContent = "Talimat uygulanıyor...";
+    setAnalysisModal(true, "Talimat uygulanıyor...", "Talimat İşleniyor...");
     await flushStatusPaint();
-    const parsedCommands = parseInstructionCommands(message);
-    const { valid: validCommands, ignored: ignoredCommands } = validateInstructionCommands(parsedCommands);
     let instructionResult = { applied: [], changedRows: 0 };
 
-    if (directEdit) {
-      instructionResult = applyInstructionCommands(validCommands);
-      renderTable();
-    } else {
+    if (willRerun) {
       setAnalysisModal(true, "Talimata göre analiz ve eşleştirme yenileniyor...");
       const canReextract = sourceMode === "text"
         ? Boolean(orderTextEl?.value?.trim())
@@ -654,20 +775,26 @@ async function rerunMatchingByInstruction(message) {
           setAnalysisModal(true, `${current}/${total} satır talimata göre analiz/eşleştirme yapılıyor...`);
         }
       });
-      instructionResult = applyInstructionCommands(validCommands);
+      instructionResult = applyInstructionCommands(plan.rowCommands || []);
+      renderTable();
+    } else {
+      instructionResult = applyInstructionCommands(plan.rowCommands || []);
       renderTable();
     }
-    pendingChatLearning = {
-      message,
+
+    pendingChatLearning = plan.learnable ? {
+      rawMessage: message,
+      plan,
       createdAt: Date.now(),
-      sourceMode,
-      profileId: extractedDoc?.learning?.applied_profile_id ?? null
-    };
-    const notes = describeInstructionCommands(instructionResult.applied, ignoredCommands);
+      sourceMode
+    } : null;
+
+    const notes = describeInstructionCommands(instructionResult.applied, plan.ignoredRowCommands || []);
     const overrideNote = notes.length ? ` Uygulanan komutlar: ${notes.join(" | ")}.` : "";
-    appendInstructionMessage("assistant", directEdit
-      ? `Tamamlandı. ${instructionResult.changedRows} satır güncellendi.${overrideNote} Bu talimat, Seçimleri Kaydet sonrası öğrenilecek.`
-      : `Tamamlandı. ${rows.length} satır talimata göre yenilendi.${overrideNote} Bu talimat, Seçimleri Kaydet sonrası öğrenilecek.`);
+    const learnNote = pendingChatLearning ? " Bu talimat, Seçimleri Kaydet sonrası policy adayı olarak değerlendirilecek." : "";
+    appendInstructionMessage("assistant", willRerun
+      ? `Tamamlandı. ${rows.length} satır güncellendi.${overrideNote}${learnNote}`
+      : `Tamamlandı. ${instructionResult.changedRows} satır güncellendi.${overrideNote}${learnNote}`);
   } catch (err) {
     appendInstructionMessage("assistant", `İşlem başarısız: ${err.message}`);
   } finally {
@@ -681,6 +808,10 @@ function setMode(mode) {
   offerDraftId = null;
   rows = [];
   pendingChatLearning = null;
+  activeMatchPolicy = null;
+  activeRowDefaults = null;
+  if (instructionTextEl) instructionTextEl.value = "";
+  if (matchInstructionTextEl) matchInstructionTextEl.value = "";
   renderTable();
   if (mode === "text") {
     textWrap.classList.remove("hidden");
@@ -826,9 +957,15 @@ function createEmptyRow(overrides = {}) {
     dimKalinlik: null,
     dimEn: null,
     dimBoy: null,
+    alasim: null,
+    tamper: null,
     kesimDurumu: "Kesim Var",
     mensei: "İTHAL",
     quantity: 1,
+    kg: null,
+    talasMik: null,
+    musteriNo: "",
+    musteriParcaNo: "",
     series: null,
     header_context: null,
     user_note: "manuel_satir",
@@ -892,6 +1029,7 @@ function parseDimParts(dimText) {
 }
 
 function ensureOfferDefaults(row) {
+  const selected = selectedCandidate(row);
   const [defaultKalinlik, defaultEnEtKal, defaultBoy] = parseDimParts(row.dim_text);
   if (row.offer_tip === undefined) row.offer_tip = "Satis";
   if (row.offer_isyeriDepoKodu === undefined) row.offer_isyeriDepoKodu = "";
@@ -904,9 +1042,21 @@ function ensureOfferDefaults(row) {
   if (row.mensei === undefined || row.mensei === null || row.mensei === "") {
     row.mensei = "İTHAL";
   }
-  if (row.offer_manuelStockAdi === undefined || row.offer_manuelStockAdi === null) {
-    row.offer_manuelStockAdi = selectedCandidate(row)?.stock_name || "";
+  if (row.alasim === undefined || row.alasim === null || row.alasim === "") {
+    row.alasim = selected?.alasim ?? null;
   }
+  if (row.tamper === undefined || row.tamper === null || row.tamper === "") {
+    row.tamper = selected?.tamper ?? null;
+  }
+  if (row.offer_manuelStockAdi === undefined || row.offer_manuelStockAdi === null) {
+    row.offer_manuelStockAdi = selected?.stock_name || "";
+  }
+}
+
+function syncRowStockAttributes(index, candidate) {
+  if (!rows[index]) return;
+  rows[index].alasim = candidate?.alasim ?? null;
+  rows[index].tamper = candidate?.tamper ?? null;
 }
 
 function bindOfferLineInputs() {
@@ -1018,14 +1168,15 @@ function stockSearchText(stock) {
   return [
     stock.stock_code,
     stock.stock_name,
-    stock.stock_name2,
     stock.birim,
-    stock.description,
-    stock.category1,
-    stock.product_type,
-    stock.series,
-    stock.temper,
-    stock.dim_text
+    stock.cinsi,
+    stock.alasim,
+    stock.tamper,
+    stock.erp_en,
+    stock.erp_boy,
+    stock.erp_yukseklik,
+    stock.erp_cap,
+    stock.specific_gravity
   ].filter(Boolean).join(" ").toLocaleLowerCase("tr-TR");
 }
 
@@ -1033,7 +1184,7 @@ function renderAllStocksTable() {
   if (!allStockTableBodyEl) return;
 
   if (filteredStocks.length === 0) {
-    allStockTableBodyEl.innerHTML = '<tr><td colspan="13" class="muted center">Sonuç yok.</td></tr>';
+    allStockTableBodyEl.innerHTML = '<tr><td colspan="11" class="muted center">Sonuç yok.</td></tr>';
     return;
   }
 
@@ -1048,18 +1199,15 @@ function renderAllStocksTable() {
     <tr class="${Number(stock.stock_id) === Number(modalSelectedStockId) ? "selected-row" : ""}" data-k="stock-row" data-stock-id="${stock.stock_id}">
       <td>${stock.stock_code ?? "-"}</td>
       <td>${stock.stock_name ?? "-"}</td>
-      <td>${stock.stock_name2 ?? "-"}</td>
       <td>${stock.birim ?? "-"}</td>
       <td>${formatErpNumber(stock.erp_en)}</td>
       <td>${formatErpNumber(stock.erp_boy)}</td>
       <td>${formatErpNumber(stock.erp_yukseklik)}</td>
       <td>${formatErpNumber(stock.erp_cap)}</td>
-      <td>${stock.series ?? "-"}</td>
-      <td>${stock.temper ?? "-"}</td>
-      <td>${stock.dim_text ?? "-"}</td>
-      <td>${stock.product_type ?? "-"}</td>
-      <td>${stock.category1 ?? "-"}</td>
-      <td>${stock.description ?? "-"}</td>
+      <td>${formatErpNumber(stock.specific_gravity)}</td>
+      <td>${stock.cinsi ?? "-"}</td>
+      <td>${stock.alasim ?? "-"}</td>
+      <td>${stock.tamper ?? "-"}</td>
     </tr>
   `).join("");
 
@@ -1102,11 +1250,13 @@ function bindCandidateControls() {
       if (!hit) {
         rows[index].selected_stock_id = null;
         rows[index].selected_score = null;
+        syncRowStockAttributes(index, null);
         renderTable();
         return;
       }
       rows[index].selected_stock_id = hit.stock_id;
       rows[index].selected_score = hit.score;
+      syncRowStockAttributes(index, hit);
       if (!rows[index].offer_manuelStockAdi) {
         rows[index].offer_manuelStockAdi = hit.stock_name || "";
       }
@@ -1183,11 +1333,41 @@ function bindRowInputs() {
       e.target.value = numericInput(e.target.value || "");
     });
   });
+
+  resultBodyEl.querySelectorAll("[data-k='kg']").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const index = Number(e.target.dataset.i);
+      e.target.value = decimalInput(e.target.value || "");
+      rows[index].kg = toDecimalOrNull(e.target.value);
+    });
+  });
+
+  resultBodyEl.querySelectorAll("[data-k='talas-mik']").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const index = Number(e.target.dataset.i);
+      e.target.value = decimalInput(e.target.value || "");
+      rows[index].talasMik = toDecimalOrNull(e.target.value);
+    });
+  });
+
+  resultBodyEl.querySelectorAll("[data-k='musteri-no']").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const index = Number(e.target.dataset.i);
+      rows[index].musteriNo = String(e.target.value || "");
+    });
+  });
+
+  resultBodyEl.querySelectorAll("[data-k='musteri-parca-no']").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const index = Number(e.target.dataset.i);
+      rows[index].musteriParcaNo = String(e.target.value || "");
+    });
+  });
 }
 
 function renderTable() {
   if (rows.length === 0) {
-    resultBodyEl.innerHTML = '<tr><td colspan="12" class="muted center">Sonuç yok.</td></tr>';
+    resultBodyEl.innerHTML = '<tr><td colspan="18" class="muted center">Sonuç yok.</td></tr>';
     renderOfferLines();
     return;
   }
@@ -1199,8 +1379,14 @@ function renderTable() {
     const kalinlik = row.dimKalinlik ?? defaultKalinlik;
     const en = row.dimEn ?? defaultEn;
     const boy = row.dimBoy ?? defaultBoy;
+    const alasim = row.alasim ?? selected?.alasim ?? "-";
+    const tamper = row.tamper ?? selected?.tamper ?? "-";
     const kesim = row.kesimDurumu || "Kesim Var";
     const mensei = row.mensei || "İTHAL";
+    const kg = row.kg ?? null;
+    const talasMik = row.talasMik ?? null;
+    const musteriNo = row.musteriNo ?? "";
+    const musteriParcaNo = row.musteriParcaNo ?? "";
     return `
       <tr>
         <td>${index + 1}</td>
@@ -1213,6 +1399,8 @@ function renderTable() {
         <td>
           <input data-k="dim-boy" data-i="${index}" class="dim-input" value="${dimensionInput(boy)}" ${matchedOfferLocked ? "disabled" : ""} />
         </td>
+        <td>${alasim || "-"}</td>
+        <td>${tamper || "-"}</td>
         <td class="stock-code-cell">
           <select data-k="candidate-select" data-i="${index}" ${(candidates.length === 0 || matchedOfferLocked) ? "disabled" : ""}>
             ${candidates.length === 0 ? '<option value="">Stok seçin</option>' : ""}
@@ -1249,6 +1437,46 @@ function renderTable() {
             pattern="[0-9]*"
             value="${numericInput(row.quantity)}"
             placeholder="Adet"
+            ${matchedOfferLocked ? "disabled" : ""}
+          />
+        </td>
+        <td>
+          <input
+            data-k="kg"
+            data-i="${index}"
+            class="qty-input"
+            value="${dimensionInput(kg)}"
+            placeholder="Kg"
+            ${matchedOfferLocked ? "disabled" : ""}
+          />
+        </td>
+        <td>
+          <input
+            data-k="talas-mik"
+            data-i="${index}"
+            class="qty-input"
+            value="${dimensionInput(talasMik)}"
+            placeholder="Talaş Mik."
+            ${matchedOfferLocked ? "disabled" : ""}
+          />
+        </td>
+        <td>
+          <input
+            data-k="musteri-no"
+            data-i="${index}"
+            class="qty-input"
+            value="${musteriNo}"
+            placeholder="Müşteri No"
+            ${matchedOfferLocked ? "disabled" : ""}
+          />
+        </td>
+        <td>
+          <input
+            data-k="musteri-parca-no"
+            data-i="${index}"
+            class="qty-input"
+            value="${musteriParcaNo}"
+            placeholder="Müşteri Parça No"
             ${matchedOfferLocked ? "disabled" : ""}
           />
         </td>
@@ -1290,6 +1518,7 @@ async function runAnalysis(doc, options = {}) {
       text: item.query,
       topK: candidateCount(),
       matchInstruction: currentMatchInstruction() || undefined,
+      matchPolicy: currentMatchPolicy() || undefined,
       filters
     });
     const candidates = res.results || [];
@@ -1303,17 +1532,29 @@ async function runAnalysis(doc, options = {}) {
       dimKalinlik: defaultKalinlik,
       dimEn: defaultEn,
       dimBoy: defaultBoy,
+      alasim: candidates[0]?.alasim ?? null,
+      tamper: candidates[0]?.tamper ?? null,
       kesimDurumu: "Kesim Var",
       quantity: item.qty,
+      kg: null,
+      talasMik: null,
+      musteriNo: "",
+      musteriParcaNo: "",
       series: item.series,
       header_context: item.header_context,
       user_note: item.qty ? `adet:${item.qty}` : ""
     });
   }
 
+  const rowDefaults = currentRowDefaults() || doc.learning?.row_defaults || null;
+  if (rowDefaults) {
+    applyInstructionCommands([{ scope: "all", set: rowDefaults }]);
+  }
+
   renderTable();
-  const learnedFrom = doc.learning?.applied_profile_name ? ` | Profil: ${doc.learning.applied_profile_name}` : "";
-  saveStatusEl.textContent = `${rows.length} satır analiz edildi. Kaynak: ${formatSourceType(doc.source_type)} | Yöntem: ${formatExtractionMethod(doc.extraction_method)}${learnedFrom}`;
+  const learnedProfile = doc.learning?.applied_profile_name ? ` | Profil: ${doc.learning.applied_profile_name}` : "";
+  const learnedPolicy = doc.learning?.applied_instruction_policy_name ? ` | Talimat Politikası: ${doc.learning.applied_instruction_policy_name}` : "";
+  saveStatusEl.textContent = `${rows.length} satır analiz edildi. Kaynak: ${formatSourceType(doc.source_type)} | Yöntem: ${formatExtractionMethod(doc.extraction_method)}${learnedProfile}${learnedPolicy}`;
 }
 
 function applyLearnedInstructions(doc) {
@@ -1324,6 +1565,12 @@ function applyLearnedInstructions(doc) {
   if (doc.learning.applied_match_instruction && matchInstructionTextEl && !currentMatchInstruction()) {
     matchInstructionTextEl.value = doc.learning.applied_match_instruction;
   }
+  if (!activeMatchPolicy && doc.learning.applied_match_policy) {
+    activeMatchPolicy = doc.learning.applied_match_policy;
+  }
+  if (!activeRowDefaults && doc.learning.row_defaults) {
+    activeRowDefaults = doc.learning.row_defaults;
+  }
 }
 
 function mapRowsForOfferSave() {
@@ -1332,9 +1579,15 @@ function mapRowsForOfferSave() {
     selected_stock_id: row.selected_stock_id ?? null,
     selected_score: row.selected_score ?? null,
     quantity: row.quantity ?? null,
+    kg: row.kg ?? null,
+    talasMik: row.talasMik ?? null,
+    musteriNo: row.musteriNo ?? "",
+    musteriParcaNo: row.musteriParcaNo ?? "",
     dimKalinlik: row.dimKalinlik ?? null,
     dimEn: row.dimEn ?? null,
     dimBoy: row.dimBoy ?? null,
+    alasim: row.alasim ?? selectedCandidate(row)?.alasim ?? null,
+    tamper: row.tamper ?? selectedCandidate(row)?.tamper ?? null,
     kesimDurumu: row.kesimDurumu ?? null,
     mensei: row.mensei ?? "İTHAL",
     user_note: row.user_note ?? null,
@@ -1352,12 +1605,18 @@ function collectMatchedTableExportRows() {
       kalinlik: row.dimKalinlik ?? null,
       en: row.dimEn ?? null,
       boy: row.dimBoy ?? null,
+      alasim: row.alasim ?? selected?.alasim ?? "",
+      tamper: row.tamper ?? selected?.tamper ?? "",
       stokKodu: selected?.stock_code ?? "",
       stokAdi: selected?.stock_name ?? "",
       birim: selected?.birim ?? "",
       kesimDurumu: row.kesimDurumu ?? "Kesim Var",
       mensei: row.mensei ?? "İTHAL",
-      adet: row.quantity ?? null
+      adet: row.quantity ?? null,
+      kg: row.kg ?? null,
+      talasMik: row.talasMik ?? null,
+      musteriNo: row.musteriNo ?? "",
+      musteriParcaNo: row.musteriParcaNo ?? ""
     };
   });
 }
@@ -1384,6 +1643,10 @@ function collectMatchedOfferMeta() {
     movementCode: offerMetaMovementCodeEl?.value?.trim() || "",
     customerCode: offerMetaCustomerEl?.value?.trim() || "",
     representativeCode: offerMetaRepresentativeEl?.value?.trim() || "",
+    warehouseCode: offerMetaWarehouseEl?.value?.trim() || "",
+    paymentPlanCode: offerMetaPaymentPlanEl?.value?.trim() || "",
+    incotermName: offerMetaIncotermEl?.value?.trim() || "",
+    deliveryDate: offerMetaDeliveryDateEl?.value?.trim() || "",
     description: offerMetaDescriptionEl?.value?.trim() || ""
   };
 }
@@ -1415,6 +1678,33 @@ function applyMatchedOfferMeta(meta = {}) {
       offerMetaRepresentativeEl._lookupInput.value = meta.representativeCode || "";
     }
     offerMetaRepresentativeEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (offerMetaWarehouseEl) {
+    fillSelectOptions(offerMetaWarehouseEl, meta.warehouseCode ? [{ value: meta.warehouseCode, label: meta.warehouseCode }] : []);
+    offerMetaWarehouseEl.value = meta.warehouseCode || "";
+    if (offerMetaWarehouseEl._lookupInput) {
+      offerMetaWarehouseEl._lookupInput.value = meta.warehouseCode || "";
+    }
+    offerMetaWarehouseEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (offerMetaPaymentPlanEl) {
+    fillSelectOptions(offerMetaPaymentPlanEl, meta.paymentPlanCode ? [{ value: meta.paymentPlanCode, label: meta.paymentPlanCode }] : []);
+    offerMetaPaymentPlanEl.value = meta.paymentPlanCode || "";
+    if (offerMetaPaymentPlanEl._lookupInput) {
+      offerMetaPaymentPlanEl._lookupInput.value = meta.paymentPlanCode || "";
+    }
+    offerMetaPaymentPlanEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (offerMetaIncotermEl) {
+    fillSelectOptions(offerMetaIncotermEl, meta.incotermName ? [{ value: meta.incotermName, label: meta.incotermName }] : []);
+    offerMetaIncotermEl.value = meta.incotermName || "";
+    if (offerMetaIncotermEl._lookupInput) {
+      offerMetaIncotermEl._lookupInput.value = meta.incotermName || "";
+    }
+    offerMetaIncotermEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (offerMetaDeliveryDateEl) {
+    offerMetaDeliveryDateEl.value = meta.deliveryDate || "";
   }
   if (offerMetaDescriptionEl) {
     offerMetaDescriptionEl.value = meta.description || "";
@@ -1450,6 +1740,8 @@ async function loadMatchedOffer(recordId) {
     const stockCode = row.stock_code || "-";
     const stockName = row.stock_name || "-";
     const birim = row.birim || "-";
+    const alasim = row.alasim || null;
+    const tamper = row.tamper || null;
     return {
       matchHistoryId: row.matchHistoryId ?? null,
       candidates: stockId ? [{
@@ -1457,6 +1749,8 @@ async function loadMatchedOffer(recordId) {
         stock_code: stockCode,
         stock_name: stockName,
         birim,
+        alasim,
+        tamper,
         score: row.selected_score ?? 0
       }] : [],
       selected_stock_id: stockId,
@@ -1465,6 +1759,12 @@ async function loadMatchedOffer(recordId) {
       dimKalinlik: row.dimKalinlik ?? null,
       dimEn: row.dimEn ?? null,
       dimBoy: row.dimBoy ?? null,
+      kg: row.kg ?? null,
+      talasMik: row.talasMik ?? null,
+      musteriNo: row.musteriNo || "",
+      musteriParcaNo: row.musteriParcaNo || "",
+      alasim,
+      tamper,
       kesimDurumu: row.kesimDurumu || "Kesim Var",
       mensei: row.mensei || "İTHAL",
       quantity: row.quantity ?? null,
@@ -1534,6 +1834,7 @@ dropzoneEl?.addEventListener("drop", async (event) => {
 
 analyzeBtnEl?.addEventListener("click", async () => {
   try {
+    pendingChatLearning = null;
     setAnalysisModal(true, "Doküman okunuyor...");
     const doc = await extractDocumentPayload();
     extractedDoc = doc;
@@ -1553,6 +1854,7 @@ analyzeBtnEl?.addEventListener("click", async () => {
 
 strongAnalyzeBtnEl?.addEventListener("click", async () => {
   try {
+    pendingChatLearning = null;
     setAnalysisModal(true, "Güçlü yapay zeka ile doküman okunuyor...");
     const doc = await extractDocumentPayload({ forceAiFallback: true });
     extractedDoc = doc;
@@ -1645,11 +1947,14 @@ function applyModalSelection() {
       stock_code: stock.stock_code,
       stock_name: stock.stock_name,
       birim: stock.birim ?? null,
+      alasim: stock.alasim ?? null,
+      tamper: stock.tamper ?? null,
       score: rows[modalRowIndex].selected_score ?? 0
     });
   }
   rows[modalRowIndex].selected_stock_id = stock.stock_id;
   rows[modalRowIndex].selected_score = existing?.score ?? rows[modalRowIndex].selected_score ?? 0;
+  syncRowStockAttributes(modalRowIndex, stock);
   if (!rows[modalRowIndex].offer_manuelStockAdi) {
     rows[modalRowIndex].offer_manuelStockAdi = stock.stock_name || "";
   }
@@ -1704,22 +2009,24 @@ el("saveBtn").addEventListener("click", async () => {
     const manualCount = rows.length - feedbackRows.length;
     if (success > 0 && extractedDoc) {
       try {
-        if (pendingChatLearning?.message) {
-          const learning = await ensureChatProfileSavedForLearning(pendingChatLearning.message, extractedDoc);
-          if (learning?.profileId) {
-            pendingChatLearning.profileId = learning.profileId;
-          }
-        }
         await api("/profiles/confirm", "POST", {
           extractedDoc,
           approved: failed.length === 0
         });
-        if (pendingChatLearning?.message) {
+        if (pendingChatLearning?.plan) {
+          const commitResult = await api("/instruction-policies/commit", "POST", {
+            rawMessage: pendingChatLearning.rawMessage,
+            plan: pendingChatLearning.plan,
+            extractedDoc,
+            approved: failed.length === 0,
+            sourceName: currentSourceName()
+          });
           if (failed.length === 0) {
-            appendInstructionMessage("assistant", `Talimat öğrenildi ve onaylandı${pendingChatLearning.profileId ? ` (#${pendingChatLearning.profileId})` : ""}.`);
+            const activationNote = commitResult.activated ? " Politika aktifleşti." : " Politika aday havuzuna eklendi.";
+            appendInstructionMessage("assistant", `Talimat politikası kaydedildi${commitResult.policyId ? ` (#${commitResult.policyId})` : ""}.${activationNote}`);
             pendingChatLearning = null;
           } else {
-            appendInstructionMessage("assistant", "Kayıt kısmi tamamlandı. Talimat öğrenmesi tam onay için yeniden Seçimleri Kaydet bekliyor.");
+            appendInstructionMessage("assistant", "Kayıt kısmi tamamlandı. Talimat politikası tam onay için yeniden Seçimleri Kaydet bekliyor.");
           }
         }
       } catch {
@@ -1797,7 +2104,11 @@ function collectOfferPayload() {
     paraKurTipi: offerKurTipiEl?.value?.trim() || "",
     paraKur: toDecimalOrNull(offerKurDegeriEl?.value),
     teslimOdemeSekli: offerTeslimOdemeSekliEl?.value?.trim() || "",
-    nakliyeSekli: offerNakliyeSekliEl?.value?.trim() || ""
+    nakliyeSekli: offerNakliyeSekliEl?.value?.trim() || "",
+    warehouseCode: offerMetaWarehouseEl?.value?.trim() || "",
+    paymentPlanDesc: offerMetaPaymentPlanEl?.value?.trim() || "",
+    shippingDate: offerMetaDeliveryDateEl?.value?.trim() || "",
+    deliveryDate: offerMetaDeliveryDateEl?.value?.trim() || ""
   };
 
   const required = [
@@ -1894,6 +2205,7 @@ if (offerBelgeTarihiEl && !offerBelgeTarihiEl.value) {
 }
 
 initializeOfferMetaPanel();
+bindHeaderCopyControls();
 const pageParams = new URLSearchParams(window.location.search);
 setMatchedOfferLocked(pageParams.get("readonly") === "1");
 

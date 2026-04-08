@@ -42,6 +42,10 @@ export const env = {
       boy: optional("ERP_COL_BOY", "Boy"),
       yukseklik: optional("ERP_COL_YUKSEKLIK", "Yükseklik"),
       cap: optional("ERP_COL_CAP", "Çap"),
+      specificGravity: optional("ERP_COL_SPECIFIC_GRAVITY", "Özgül Ağırlık"),
+      cinsi: optional("ERP_COL_CINSI", "Cinsi"),
+      alasim: optional("ERP_COL_ALASIM", "Alaşım"),
+      tamper: optional("ERP_COL_TAMPER", "Tamper"),
       updatedAt: process.env["ERP_COL_UPDATED_AT"] ?? "updated_at"
     }
   },

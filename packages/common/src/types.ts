@@ -12,6 +12,10 @@ export interface StockMasterRow {
   erp_boy?: number | null;
   erp_yukseklik?: number | null;
   erp_cap?: number | null;
+  specific_gravity?: number | null;
+  cinsi?: string | null;
+  alasim?: string | null;
+  tamper?: string | null;
   updated_at: Date | null;
   is_active?: boolean;
 }
@@ -32,10 +36,38 @@ export interface MatchInput {
   text: string;
   topK?: number;
   matchInstruction?: string;
+  matchPolicy?: MatchPolicy | null;
   filters?: {
     product_type?: string;
     series?: string;
   };
+}
+
+export interface MatchPolicy {
+  stockCodePrefix?: string | null;
+  requiredTerms?: string[];
+  preferredSeries?: string | null;
+  preferredTemper?: string | null;
+  preferredProductType?: string | null;
+}
+
+export interface RowInstructionSet {
+  kesimDurumu?: "Kesim Var" | "Kesim Yok";
+  mensei?: "YERLİ" | "İTHAL";
+  quantity?: number;
+}
+
+export interface RowInstructionCommand {
+  scope: "all" | "row";
+  rowIndex?: number;
+  rowNumber?: number;
+  set: RowInstructionSet;
+}
+
+export interface InstructionPolicyPayload {
+  extractionPrompt?: string | null;
+  matchPolicy?: MatchPolicy | null;
+  rowDefaults?: RowInstructionSet | null;
 }
 
 export interface ParsedOrderLine {
@@ -61,12 +93,17 @@ export interface ParsedOrderDocument {
   extraction_method?: string | null;
   learning?: {
     fingerprint_text?: string | null;
+    fingerprint_hash?: string | null;
     fingerprint_json?: Record<string, unknown> | null;
     user_instruction?: string | null;
     effective_instruction?: string | null;
     applied_match_instruction?: string | null;
+    applied_match_policy?: MatchPolicy | null;
     applied_profile_id?: number | null;
     applied_profile_name?: string | null;
+    applied_instruction_policy_id?: number | null;
+    applied_instruction_policy_name?: string | null;
+    row_defaults?: RowInstructionSet | null;
   } | null;
   debug?: {
     requested_mode?: string | null;
@@ -101,6 +138,14 @@ export interface CandidateRow {
   stock_code: string | null;
   stock_name: string | null;
   birim?: string | null;
+  erp_cap?: number | null;
+  erp_en?: number | null;
+  erp_boy?: number | null;
+  erp_yukseklik?: number | null;
+  cinsi?: string | null;
+  alasim?: string | null;
+  tamper?: string | null;
+  specific_gravity?: number | null;
   product_type: string | null;
   series: string | null;
   series_group: string | null;
@@ -117,6 +162,10 @@ export interface ScoredResult {
   stock_code: string | null;
   stock_name: string | null;
   birim?: string | null;
+  alasim?: string | null;
+  tamper?: string | null;
+  series?: string | null;
+  temper?: string | null;
   score: number;
   why: string[];
 }

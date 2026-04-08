@@ -2,22 +2,19 @@ import path from "node:path";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import * as XLSX from "xlsx";
-import { extractFeaturesFromInput, MatchInput, CandidateRow, ParsedOrderDocument, ScoredResult, scoreCandidates as baseScoreCandidates } from "@smp/common";
+import { extractFeaturesFromInput, MatchInput, CandidateRow, InstructionPolicyPayload, MatchPolicy, ParsedOrderDocument, ScoredResult, scoreCandidates as baseScoreCandidates } from "@smp/common";
 import { env, matchPool } from "@smp/db";
 import { getModelStatus, retrainModelFromHistory } from "./ml";
 import { rerankResults } from "./rerank";
 import { extractSourceDocument } from "./source-extract";
 import { recordExtractionFeedback, saveExtractionProfile } from "./extraction-learning";
+import { commitInstructionPolicy, parseMatchPolicy, planInstructionMessage } from "./instruction-policies";
 import { authenticateCredentials, createSession, destroySession, ensureDefaultAdminUser, hashPassword, resolveRequestUser, shouldRedirectToLogin, isPublicPath } from "./auth";
 import { getLookupOptions, postUyumRequest } from "./uyum-lookups";
 
 const app = Fastify({ logger: true });
 
-interface MatchGuidance {
-  stockCodePrefix: string | null;
-  requiredTerms: string[];
-  preferredSeries: string | null;
-}
+type MatchGuidance = MatchPolicy;
 
 interface OfferHeaderInput {
   isyeriKodu: string;
@@ -28,6 +25,10 @@ interface OfferHeaderInput {
   paraKur?: number | null;
   teslimOdemeSekli: string;
   nakliyeSekli: string;
+  warehouseCode?: string | null;
+  paymentPlanDesc?: string | null;
+  shippingDate?: string | null;
+  deliveryDate?: string | null;
 }
 
 interface OfferLineInput {
@@ -57,9 +58,15 @@ interface MatchedOfferLineInput {
   selected_stock_id?: number | null;
   selected_score?: number | null;
   quantity?: number | null;
+  kg?: number | null;
+  talasMik?: number | null;
+  musteriNo?: string | null;
+  musteriParcaNo?: string | null;
   dimKalinlik?: number | null;
   dimEn?: number | null;
   dimBoy?: number | null;
+  alasim?: string | null;
+  tamper?: string | null;
   kesimDurumu?: string | null;
   mensei?: string | null;
   user_note?: string | null;
@@ -78,6 +85,10 @@ interface SaveMatchedOfferBody {
   movementCode?: string | null;
   customerCode?: string | null;
   representativeCode?: string | null;
+  warehouseCode?: string | null;
+  paymentPlanCode?: string | null;
+  incotermName?: string | null;
+  deliveryDate?: string | null;
   description?: string | null;
   rows: MatchedOfferLineInput[];
 }
@@ -88,6 +99,10 @@ interface SendMatchedOfferToErpBody {
   movementCode?: string | null;
   customerCode?: string | null;
   representativeCode?: string | null;
+  warehouseCode?: string | null;
+  paymentPlanCode?: string | null;
+  incotermName?: string | null;
+  deliveryDate?: string | null;
   description?: string | null;
   rows: MatchedOfferLineInput[];
 }
@@ -97,6 +112,12 @@ interface ExportMatchedTableRowInput {
   kalinlik?: number | null;
   en?: number | null;
   boy?: number | null;
+  kg?: number | null;
+  talasMik?: number | null;
+  musteriNo?: string | null;
+  musteriParcaNo?: string | null;
+  alasim?: string | null;
+  tamper?: string | null;
   stokKodu?: string | null;
   stokAdi?: string | null;
   birim?: string | null;
@@ -150,13 +171,24 @@ function normalizeGuidanceText(value: string): string {
     .trim();
 }
 
+function formatErpDateTime(value: string | null | undefined): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return raw;
+  const [, year, month, day] = match;
+  return `${Number(day)}.${month}.${year} 00:00:00`;
+}
+
 function parseMatchGuidance(instruction: string | undefined): MatchGuidance {
   const normalized = normalizeGuidanceText(instruction ?? "");
   if (!normalized) {
     return {
       stockCodePrefix: null,
       requiredTerms: [],
-      preferredSeries: null
+      preferredSeries: null,
+      preferredTemper: null,
+      preferredProductType: null
     };
   }
 
@@ -169,7 +201,20 @@ function parseMatchGuidance(instruction: string | undefined): MatchGuidance {
   return {
     stockCodePrefix: prefixMatch?.[1]?.toUpperCase() ?? null,
     requiredTerms,
-    preferredSeries: seriesMatch?.[1] ?? null
+    preferredSeries: seriesMatch?.[1] ?? null,
+    preferredTemper: null,
+    preferredProductType: null
+  };
+}
+
+function buildGuidance(instruction: string | undefined, policy: MatchPolicy | null | undefined): MatchGuidance {
+  const parsed = parseMatchGuidance(instruction);
+  return {
+    stockCodePrefix: policy?.stockCodePrefix ?? parsed.stockCodePrefix ?? null,
+    requiredTerms: [...new Set([...(policy?.requiredTerms ?? []), ...(parsed.requiredTerms ?? [])])],
+    preferredSeries: policy?.preferredSeries ?? parsed.preferredSeries ?? null,
+    preferredTemper: policy?.preferredTemper ?? parsed.preferredTemper ?? null,
+    preferredProductType: policy?.preferredProductType ?? parsed.preferredProductType ?? null
   };
 }
 
@@ -212,6 +257,7 @@ function applyLearningBoost(results: ScoredResult[], boostMap: Map<number, numbe
 }
 
 function applyGuidanceFilters(candidates: CandidateRow[], guidance: MatchGuidance): CandidateRow[] {
+  const requiredTerms = guidance.requiredTerms ?? [];
   return candidates.filter((candidate) => {
     if (guidance.stockCodePrefix) {
       const stockCode = (candidate.stock_code ?? "").toUpperCase();
@@ -220,9 +266,9 @@ function applyGuidanceFilters(candidates: CandidateRow[], guidance: MatchGuidanc
       }
     }
 
-    if (guidance.requiredTerms.length > 0) {
+    if (requiredTerms.length > 0) {
       const haystack = `${candidate.stock_code ?? ""} ${candidate.stock_name ?? ""}`.toLocaleLowerCase("tr-TR");
-      if (!guidance.requiredTerms.every((term) => haystack.includes(term.toLocaleLowerCase("tr-TR")))) {
+      if (!requiredTerms.every((term) => haystack.includes(term.toLocaleLowerCase("tr-TR")))) {
         return false;
       }
     }
@@ -231,12 +277,27 @@ function applyGuidanceFilters(candidates: CandidateRow[], guidance: MatchGuidanc
       return false;
     }
 
+    if (guidance.preferredTemper) {
+      const temper = (candidate.temper ?? candidate.tamper ?? "").toLocaleUpperCase("tr-TR");
+      if (temper && temper !== guidance.preferredTemper) {
+        return false;
+      }
+    }
+
+    if (guidance.preferredProductType) {
+      const productType = (candidate.product_type ?? candidate.cinsi ?? "").toLocaleUpperCase("tr-TR");
+      if (productType && productType !== guidance.preferredProductType) {
+        return false;
+      }
+    }
+
     return true;
   });
 }
 
 function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[], guidance: MatchGuidance): ScoredResult[] {
-  if (!guidance.stockCodePrefix && guidance.requiredTerms.length === 0 && !guidance.preferredSeries) {
+  const requiredTerms = guidance.requiredTerms ?? [];
+  if (!guidance.stockCodePrefix && requiredTerms.length === 0 && !guidance.preferredSeries && !guidance.preferredTemper && !guidance.preferredProductType) {
     return results;
   }
 
@@ -258,9 +319,25 @@ function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[],
       why.push(`instruction series ${guidance.preferredSeries}`);
     }
 
-    if (guidance.requiredTerms.length > 0) {
+    if (guidance.preferredTemper) {
+      const temper = (candidate.temper ?? candidate.tamper ?? "").toLocaleUpperCase("tr-TR");
+      if (temper === guidance.preferredTemper) {
+        score += 14;
+        why.push(`instruction temper ${guidance.preferredTemper}`);
+      }
+    }
+
+    if (guidance.preferredProductType) {
+      const productType = (candidate.product_type ?? candidate.cinsi ?? "").toLocaleUpperCase("tr-TR");
+      if (productType === guidance.preferredProductType) {
+        score += 12;
+        why.push(`instruction type ${guidance.preferredProductType}`);
+      }
+    }
+
+    if (requiredTerms.length > 0) {
       const haystack = `${candidate.stock_code ?? ""} ${candidate.stock_name ?? ""}`.toLocaleLowerCase("tr-TR");
-      const matchedTerms = guidance.requiredTerms.filter((term) => haystack.includes(term.toLocaleLowerCase("tr-TR")));
+      const matchedTerms = requiredTerms.filter((term) => haystack.includes(term.toLocaleLowerCase("tr-TR")));
       if (matchedTerms.length > 0) {
         score += matchedTerms.length * 10;
         why.push(`instruction terms ${matchedTerms.join(", ")}`);
@@ -446,6 +523,10 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
     const movementCode = String(body.movementCode ?? "").trim() || null;
     const customerCode = String(body.customerCode ?? "").trim() || null;
     const representativeCode = String(body.representativeCode ?? "").trim() || null;
+    const warehouseCode = String(body.warehouseCode ?? "").trim() || null;
+    const paymentPlanCode = String(body.paymentPlanCode ?? "").trim() || null;
+    const incotermName = String(body.incotermName ?? "").trim() || null;
+    const deliveryDate = String(body.deliveryDate ?? "").trim() || null;
     const description = String(body.description ?? "").trim() || null;
     let offerId = Number(body.offerId);
 
@@ -453,9 +534,9 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
       const insertRes = await client.query<{ id: string }>(
         `INSERT INTO matched_offers(
            title, source_name, source_type, extraction_method, profile_name, created_by_user_id, line_count, status,
-           offer_date, movement_code, customer_code, representative_code, description
+           offer_date, movement_code, customer_code, representative_code, warehouse_code, payment_plan_code, incoterm_name, delivery_date, description
          )
-         VALUES($1,$2,$3,$4,$5,$6,$7,'saved',$8,$9,$10,$11,$12)
+         VALUES($1,$2,$3,$4,$5,$6,$7,'saved',$8,$9,$10,$11,$12,$13,$14,$15,$16)
          RETURNING id::text`,
         [
           normalizedTitle,
@@ -469,6 +550,10 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           movementCode,
           customerCode,
           representativeCode,
+          warehouseCode,
+          paymentPlanCode,
+          incotermName,
+          deliveryDate,
           description
         ]
       );
@@ -500,7 +585,11 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
              movement_code=$9,
              customer_code=$10,
              representative_code=$11,
-             description=$12,
+             warehouse_code=$12,
+             payment_plan_code=$13,
+             incoterm_name=$14,
+             delivery_date=$15,
+             description=$16,
              updated_at=NOW()
          WHERE id=$1`,
         [
@@ -515,6 +604,10 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           movementCode,
           customerCode,
           representativeCode,
+          warehouseCode,
+          paymentPlanCode,
+          incotermName,
+          deliveryDate,
           description
         ]
       );
@@ -546,8 +639,9 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
       await client.query(
         `INSERT INTO matched_offer_lines(
            matched_offer_id, line_no, match_history_id, selected_stock_id, stock_code, stock_name, birim,
-           quantity, dim_kalinlik, dim_en, dim_boy, kesim_durumu, selected_score, is_manual, source_line_text, line_json
-         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)`,
+           quantity, kg, talas_mik, musteri_no, musteri_parca_no,
+           dim_kalinlik, dim_en, dim_boy, kesim_durumu, selected_score, is_manual, source_line_text, line_json
+         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb)`,
         [
           offerId,
           index + 1,
@@ -557,6 +651,10 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           stockName,
           birim,
           toSafeNumber(row.quantity),
+          toSafeNumber(row.kg),
+          toSafeNumber(row.talasMik),
+          String(row.musteriNo ?? "").trim() || null,
+          String(row.musteriParcaNo ?? "").trim() || null,
           toSafeNumber(row.dimKalinlik),
           toSafeNumber(row.dimEn),
           toSafeNumber(row.dimBoy),
@@ -835,6 +933,10 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
     movement_code: string | null;
     customer_code: string | null;
     representative_code: string | null;
+    warehouse_code: string | null;
+    payment_plan_code: string | null;
+    incoterm_name: string | null;
+    delivery_date: string | null;
     description: string | null;
     status: string | null;
     created_by_user_id: string | null;
@@ -842,7 +944,10 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
   }>(
     `SELECT id::text, title, source_name, source_type, extraction_method, profile_name,
             TO_CHAR(offer_date, 'YYYY-MM-DD') AS offer_date,
-            movement_code, customer_code, representative_code, description,
+            movement_code, customer_code, representative_code,
+            warehouse_code, payment_plan_code, incoterm_name,
+            TO_CHAR(delivery_date, 'YYYY-MM-DD') AS delivery_date,
+            description,
             status, created_by_user_id::text, created_at
      FROM matched_offers
      WHERE id = $1
@@ -867,15 +972,25 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
     stock_name: string | null;
     birim: string | null;
     quantity: string | null;
+    kg: string | null;
+    talas_mik: string | null;
+    musteri_no: string | null;
+    musteri_parca_no: string | null;
     dim_kalinlik: string | null;
     dim_en: string | null;
     dim_boy: string | null;
+    alasim: string | null;
+    tamper: string | null;
     kesim_durumu: string | null;
     selected_score: string | null;
     is_manual: boolean;
   }>(
     `SELECT line_no, match_history_id::text, selected_stock_id, stock_code, stock_name, birim,
-            quantity::text, dim_kalinlik::text, dim_en::text, dim_boy::text, kesim_durumu, selected_score::text, is_manual
+            quantity::text, kg::text, talas_mik::text, musteri_no, musteri_parca_no,
+            dim_kalinlik::text, dim_en::text, dim_boy::text,
+            NULLIF(line_json->>'alasim', '') AS alasim,
+            NULLIF(line_json->>'tamper', '') AS tamper,
+            kesim_durumu, selected_score::text, is_manual
      FROM matched_offer_lines
      WHERE matched_offer_id = $1
      ORDER BY line_no`,
@@ -894,6 +1009,10 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
       movementCode: offer.movement_code,
       customerCode: offer.customer_code,
       representativeCode: offer.representative_code,
+      warehouseCode: offer.warehouse_code,
+      paymentPlanCode: offer.payment_plan_code,
+      incotermName: offer.incoterm_name,
+      deliveryDate: offer.delivery_date,
       description: offer.description,
       status: offer.status,
       sentToErp: offer.status === "sent",
@@ -904,9 +1023,15 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
       selected_stock_id: row.selected_stock_id && row.selected_stock_id > 0 ? row.selected_stock_id : null,
       selected_score: row.selected_stock_id && row.selected_stock_id > 0 ? toSafeNumber(row.selected_score) : null,
       quantity: toSafeNumber(row.quantity),
+      kg: toSafeNumber(row.kg),
+      talasMik: toSafeNumber(row.talas_mik),
+      musteriNo: row.musteri_no,
+      musteriParcaNo: row.musteri_parca_no,
       dimKalinlik: toSafeNumber(row.dim_kalinlik),
       dimEn: toSafeNumber(row.dim_en),
       dimBoy: toSafeNumber(row.dim_boy),
+      alasim: row.alasim,
+      tamper: row.tamper,
       kesimDurumu: row.kesim_durumu,
       isManual: row.is_manual,
       stock_code: row.stock_code,
@@ -1039,40 +1164,33 @@ app.get("/stocks", async () => {
     stock_id: number;
     stock_code: string | null;
     stock_name: string | null;
-    stock_name2: string | null;
-    description: string | null;
-    category1: string | null;
     birim: string | null;
     erp_en: number | null;
     erp_boy: number | null;
     erp_yukseklik: number | null;
     erp_cap: number | null;
-    product_type: string | null;
-    series: string | null;
-    temper: string | null;
-    dim_text: string | null;
+    specific_gravity: number | null;
+    cinsi: string | null;
+    alasim: string | null;
+    tamper: string | null;
   }>(
     `SELECT
        sm.stock_id,
        sm.stock_code,
        sm.stock_name,
-       sm.stock_name2,
-       sm.description,
-       sm.category1,
        sm.birim,
        sm.erp_en,
        sm.erp_boy,
        sm.erp_yukseklik,
        sm.erp_cap,
-       sf.product_type,
-       sf.series,
-       sf.temper,
-       sf.dim_text
-     FROM stock_master sm
-     LEFT JOIN stock_features sf ON sf.stock_id = sm.stock_id
-     WHERE sm.is_active = TRUE
-     ORDER BY COALESCE(sm.stock_code, ''), COALESCE(sm.stock_name, '')
-     LIMIT 5000`
+       sm.specific_gravity,
+       sm.cinsi,
+       sm.alasim,
+       sm.tamper
+      FROM stock_master sm
+      WHERE sm.is_active = TRUE
+      ORDER BY COALESCE(sm.stock_code, ''), COALESCE(sm.stock_name, '')
+      LIMIT 5000`
   );
 
   return {
@@ -1080,18 +1198,15 @@ app.get("/stocks", async () => {
       stock_id: Number(row.stock_id),
       stock_code: row.stock_code,
       stock_name: row.stock_name,
-      stock_name2: row.stock_name2,
-      description: row.description,
-      category1: row.category1,
       birim: row.birim,
       erp_en: row.erp_en,
       erp_boy: row.erp_boy,
       erp_yukseklik: row.erp_yukseklik,
       erp_cap: row.erp_cap,
-      product_type: row.product_type,
-      series: row.series,
-      temper: row.temper,
-      dim_text: row.dim_text
+      specific_gravity: row.specific_gravity,
+      cinsi: row.cinsi,
+      alasim: row.alasim,
+      tamper: row.tamper
     }))
   };
 });
@@ -1142,6 +1257,28 @@ app.post<{
 
 app.post<{
   Body: {
+    message: string;
+    rowCount?: number;
+    sourceMode?: string;
+  };
+}>("/instructions/plan", async (request, reply) => {
+  const message = request.body?.message?.trim() ?? "";
+  if (!message) {
+    return reply.code(400).send({ error: "message gerekli" });
+  }
+
+  return {
+    ok: true,
+    plan: planInstructionMessage({
+      message,
+      rowCount: Math.max(0, Number(request.body?.rowCount ?? 0)),
+      sourceMode: request.body?.sourceMode?.trim() || "text"
+    })
+  };
+});
+
+app.post<{
+  Body: {
     profileName: string;
     userInstruction: string;
     matchInstruction?: string;
@@ -1166,7 +1303,7 @@ app.post<{
       sourceType: extractedDoc.source_type,
       text: extractedDoc.learning.fingerprint_text,
       json: extractedDoc.learning.fingerprint_json,
-      hash: ""
+      hash: extractedDoc.learning.fingerprint_hash ?? ""
     },
     extractedDoc,
     sampleName: request.body?.sampleName?.trim() || null
@@ -1192,7 +1329,7 @@ app.post<{
       sourceType: extractedDoc.source_type,
       text: extractedDoc.learning.fingerprint_text,
       json: extractedDoc.learning.fingerprint_json,
-      hash: ""
+      hash: extractedDoc.learning.fingerprint_hash ?? ""
     },
     userInstruction: extractedDoc.learning.user_instruction ?? null,
     effectiveInstruction: extractedDoc.learning.effective_instruction ?? null,
@@ -1201,6 +1338,38 @@ app.post<{
   });
 
   return { ok: true };
+});
+
+app.post<{
+  Body: {
+    rawMessage: string;
+    plan: ReturnType<typeof planInstructionMessage>;
+    extractedDoc: ParsedOrderDocument;
+    approved?: boolean;
+    sourceName?: string;
+  };
+}>("/instruction-policies/commit", async (request, reply) => {
+  const extractedDoc = request.body?.extractedDoc;
+  const plan = request.body?.plan;
+  const rawMessage = request.body?.rawMessage?.trim() ?? "";
+  if (!rawMessage || !plan || !extractedDoc?.learning?.fingerprint_text || !extractedDoc.learning.fingerprint_json) {
+    return reply.code(400).send({ error: "rawMessage, plan ve extractedDoc learning metadata gerekli" });
+  }
+
+  const result = await commitInstructionPolicy({
+    fingerprint: {
+      sourceType: extractedDoc.source_type,
+      text: extractedDoc.learning.fingerprint_text,
+      json: extractedDoc.learning.fingerprint_json,
+      hash: extractedDoc.learning.fingerprint_hash ?? ""
+    },
+    sourceName: request.body?.sourceName?.trim() || null,
+    rawMessage,
+    plan,
+    approved: request.body?.approved !== false
+  });
+
+  return { ok: true, ...result };
 });
 
 app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
@@ -1213,10 +1382,25 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
 
   const extracted = extractFeaturesFromInput(text);
   const hasInputDims = [extracted.dim1, extracted.dim2, extracted.dim3].some((n) => typeof n === "number");
+  const inputThickness = [extracted.dim1, extracted.dim2, extracted.dim3]
+    .filter((n): n is number => typeof n === "number" && Number.isFinite(n))
+    .sort((a, b) => a - b)[0] ?? null;
   const candidateLimit = hasInputDims ? 350 : 120;
-  const guidance = parseMatchGuidance(request.body?.matchInstruction);
+  const guidance = buildGuidance(request.body?.matchInstruction, request.body?.matchPolicy);
+  const sqlProductTypeExpr = "COALESCE(NULLIF(sm.cinsi, ''), sf.product_type)";
+  const sqlSeriesExpr = "NULLIF(sm.alasim, '')";
+  const sqlSeriesGroupExpr = `COALESCE(
+    CASE
+      WHEN NULLIF(sm.alasim, '') ~ '^[1-9][0-9]{3}$'
+      THEN SUBSTRING(NULLIF(sm.alasim, '') FROM 1 FOR 1) || '000'
+      ELSE NULL
+    END
+  )`;
+  const sqlTemperExpr = "COALESCE(NULLIF(sm.tamper, ''), sf.temper)";
+  const sqlSeriesPresentExpr = `(${sqlSeriesExpr} IS NOT NULL AND BTRIM(${sqlSeriesExpr}) <> '')`;
+  const sqlErpCapExpr = "NULLIF(sm.erp_cap, 0)::float8";
 
-  const conditions: string[] = ["sm.is_active = TRUE"];
+  const conditions: string[] = ["sm.is_active = TRUE", sqlSeriesPresentExpr];
   const params: unknown[] = [extracted.normalized_text];
   let idx = 2;
 
@@ -1224,31 +1408,51 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
   const productTypeFilter = request.body.filters?.product_type ?? extracted.product_type;
 
   if (seriesFilter) {
-    conditions.push(`(sf.series = $${idx} OR sf.series_group = $${idx + 1})`);
+    conditions.push(`(${sqlSeriesExpr} = $${idx} OR ${sqlSeriesGroupExpr} = $${idx + 1})`);
     params.push(seriesFilter, `${seriesFilter[0]}000`);
     idx += 2;
   } else if (extracted.series_group) {
-    conditions.push(`sf.series_group = $${idx}`);
+    conditions.push(`${sqlSeriesGroupExpr} = $${idx}`);
     params.push(extracted.series_group);
     idx += 1;
   }
 
   if (productTypeFilter) {
-    conditions.push(`sf.product_type = $${idx}`);
+    conditions.push(`${sqlProductTypeExpr} = $${idx}`);
     params.push(productTypeFilter.toUpperCase());
     idx += 1;
   }
 
-  const buildSql = (whereSql: string) => `
+  const exactCapCondition = inputThickness !== null
+    ? `${sqlErpCapExpr} IS NOT NULL AND ABS(${sqlErpCapExpr} - $CAP$) <= 0.2`
+    : null;
+  const strictExactCapWhereSql = exactCapCondition
+    ? `WHERE ${[...conditions, exactCapCondition.replace("$CAP$", `$${idx}`)].join(" AND ")}`
+    : "";
+  const strictExactCapParams = inputThickness !== null ? [...params, inputThickness] : params;
+  const allActiveExactCapWhereSql = exactCapCondition
+    ? `WHERE sm.is_active = TRUE AND ${sqlSeriesPresentExpr} AND ${exactCapCondition.replace("$CAP$", "$2")}`
+    : "";
+  const allActiveExactCapParams = inputThickness !== null ? [extracted.normalized_text, inputThickness] : [extracted.normalized_text];
+
+  const buildSql = (whereSql: string, limit: number) => `
     SELECT
       sm.stock_id,
       sm.stock_code,
       sm.stock_name,
       sm.birim,
-      sf.product_type,
-      sf.series,
-      sf.series_group,
-      sf.temper,
+      NULLIF(sm.erp_cap, 0)::float8 AS erp_cap,
+      NULLIF(sm.erp_en, 0)::float8 AS erp_en,
+      NULLIF(sm.erp_boy, 0)::float8 AS erp_boy,
+      NULLIF(sm.erp_yukseklik, 0)::float8 AS erp_yukseklik,
+      sm.alasim,
+      sm.cinsi,
+      sm.specific_gravity::float8 AS specific_gravity,
+      ${sqlTemperExpr} AS tamper,
+      ${sqlProductTypeExpr} AS product_type,
+      ${sqlSeriesExpr} AS series,
+      ${sqlSeriesGroupExpr} AS series_group,
+      ${sqlTemperExpr} AS temper,
       sf.dim_text,
       sf.dim1::float8 AS dim1,
       sf.dim2::float8 AS dim2,
@@ -1258,30 +1462,77 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     JOIN stock_features sf ON sf.stock_id = sm.stock_id
     ${whereSql}
     ORDER BY similarity DESC
-    LIMIT ${candidateLimit}
+    LIMIT ${limit}
   `;
+  const searchStages = [
+    ...(inputThickness !== null ? [{
+      name: "strict_exact_cap",
+      whereSql: strictExactCapWhereSql,
+      queryParams: strictExactCapParams,
+      limit: candidateLimit
+    }] : []),
+    ...(inputThickness !== null ? [{
+      name: "all_active_exact_cap",
+      whereSql: allActiveExactCapWhereSql,
+      queryParams: allActiveExactCapParams,
+      limit: Math.max(candidateLimit, 250)
+    }] : []),
+    {
+      name: "strict",
+      whereSql: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
+      queryParams: params,
+      limit: candidateLimit
+    },
+    {
+      name: "all_active",
+      whereSql: `WHERE sm.is_active = TRUE AND ${sqlSeriesPresentExpr}`,
+      queryParams: [extracted.normalized_text],
+      limit: candidateLimit
+    },
+    {
+      name: "all_active_wide",
+      whereSql: `WHERE sm.is_active = TRUE AND ${sqlSeriesPresentExpr}`,
+      queryParams: [extracted.normalized_text],
+      limit: Math.max(candidateLimit * 3, 800)
+    }
+  ];
 
-  let whereSql = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-  let candidateRes = await matchPool.query<CandidateRow>(buildSql(whereSql), params);
-
-  if (candidateRes.rows.length === 0 && conditions.length > 1) {
-    whereSql = "WHERE sm.is_active = TRUE";
-    candidateRes = await matchPool.query<CandidateRow>(buildSql(whereSql), [extracted.normalized_text]);
-  }
-
-  let guidedCandidates = applyGuidanceFilters(candidateRes.rows, guidance);
-  if (guidedCandidates.length === 0) {
-    guidedCandidates = candidateRes.rows;
-  }
-
-  const rawScored = baseScoreCandidates(extracted, guidedCandidates, guidedCandidates.length || topK);
-  const guidedScored = applyGuidanceBoost(rawScored, guidedCandidates, guidance);
+  let results: ScoredResult[] = [];
+  let usedStage = "strict";
   const learningBoostMap = await buildLearningBoostMap({
     series: extracted.series,
     dim_text: extracted.dim_text
   });
-  const boosted = applyLearningBoost(guidedScored, learningBoostMap, guidedScored.length || topK);
-  const results = await rerankResults(text, boosted, topK);
+
+  for (const stage of searchStages) {
+    if (stage.name !== "strict" && stage.whereSql === searchStages[0].whereSql && stage.limit === searchStages[0].limit) {
+      continue;
+    }
+
+    const candidateRes = await matchPool.query<CandidateRow>(buildSql(stage.whereSql, stage.limit), stage.queryParams);
+    if (candidateRes.rows.length === 0) {
+      continue;
+    }
+
+    let guidedCandidates = applyGuidanceFilters(candidateRes.rows, guidance);
+    if (guidedCandidates.length === 0) {
+      guidedCandidates = candidateRes.rows;
+    }
+
+    if (guidedCandidates.length === 0) {
+      continue;
+    }
+
+    const rawScored = baseScoreCandidates(extracted, guidedCandidates, guidedCandidates.length || topK);
+    const guidedScored = applyGuidanceBoost(rawScored, guidedCandidates, guidance);
+    const boosted = applyLearningBoost(guidedScored, learningBoostMap, guidedScored.length || topK);
+    results = await rerankResults(text, boosted, topK);
+    usedStage = stage.name;
+
+    if (results.length > 0) {
+      break;
+    }
+  }
 
   const historyRes = await matchPool.query<{ id: string }>(
     `INSERT INTO match_history(input_text, extracted_json, results_json)
@@ -1293,6 +1544,7 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
   return {
     matchHistoryId: Number(historyRes.rows[0].id),
     extracted,
+    searchStage: usedStage,
     results
   };
 });
@@ -1430,6 +1682,10 @@ app.post<{
     return reply.code(400).send({ error: validation.error });
   }
   const safeHeader = header as OfferHeaderInput;
+  const shippingDate = formatErpDateTime(safeHeader.shippingDate ?? null);
+  const deliveryDate = formatErpDateTime(safeHeader.deliveryDate ?? null);
+  const paymentPlanDesc = String(safeHeader.paymentPlanDesc ?? "").trim() || null;
+  const whouseCode = String(safeHeader.warehouseCode ?? "").trim() || null;
 
   const client = await matchPool.connect();
   try {
@@ -1520,6 +1776,10 @@ app.post<{
     return reply.code(400).send({ error: validation.error });
   }
   const safeHeader = header as OfferHeaderInput;
+  const shippingDate = formatErpDateTime(safeHeader.shippingDate ?? null);
+  const deliveryDate = formatErpDateTime(safeHeader.deliveryDate ?? null);
+  const paymentPlanDesc = String(safeHeader.paymentPlanDesc ?? "").trim() || null;
+  const whouseCode = String(safeHeader.warehouseCode ?? "").trim() || null;
 
   const matchHistoryIds = [...new Set(lines.map((line) => Number(line.matchHistoryId)).filter((id) => Number.isFinite(id) && id > 0))];
 
@@ -1570,12 +1830,18 @@ app.post<{
         paraKurTipi: (safeHeader.paraKurTipi ?? "").toString().trim() || null,
         paraKur: safeHeader.paraKur ?? null,
         teslimOdemeSekli: String(safeHeader.teslimOdemeSekli).trim(),
-        nakliyeSekli: String(safeHeader.nakliyeSekli).trim()
+        nakliyeSekli: String(safeHeader.nakliyeSekli).trim(),
+        PaymentPlanDesc: paymentPlanDesc,
+        ShippingDate: shippingDate,
+        DeliveryDate: deliveryDate
       },
       line: {
         siraNo: index + 1,
         tip: (line.tip ?? "").toString().trim() || null,
         isyeriDepoKodu: (line.isyeriDepoKodu ?? "").toString().trim() || null,
+        WhouseCode: whouseCode,
+        ShippingDate: shippingDate,
+        DeliveryDate: deliveryDate,
         stockId: selectedStockId,
         stockCode: (line.stockCode ?? "").toString().trim() || null,
         stockName: (line.stockName ?? "").toString().trim() || null,
