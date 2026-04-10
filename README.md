@@ -295,6 +295,56 @@ Copy-Item .env.local.example .env.local
 docker compose up --build
 ```
 
+## Uzak Windows Sunucuda Yayinlama
+
+Bu repo uzak Windows sunucuda Docker Desktop ile yayinlanabilir. Local gelistirme akisi degismez; sunucu icin ayri `.env` degerleri kullanin.
+
+Onemli:
+
+- Sunucudaki PostgreSQL host makinede calisiyorsa container icinden `localhost` degil `host.docker.internal` kullanin.
+- Bu nedenle sunucuda `ERP_PG_HOST=host.docker.internal` olmalidir.
+- Uygulamanin kendi PostgreSQL'i compose icindeki `matching_db` servisi olarak calisir; bu nedenle `MATCH_PG_HOST=matching_db` ve `MATCH_PG_PORT=5432` kullanin.
+- Domain yoksa dogrudan IP uzerinden HTTP (`80`) ile yayinlayin. IP uzerinden guvenilir `443` icin ayri sertifika yonetimi gerekir.
+
+Hazir dosyalar:
+
+- `docker-compose.prod.yml`
+- `deploy/nginx/default.conf`
+- `deploy/.env.server.example`
+- `deploy/.env.local.server.example`
+- `deploy/publish-server.ps1`
+
+Sunucuda ozet kurulum:
+
+```powershell
+git clone <repo-url> C:\stock-matching-platform
+cd C:\stock-matching-platform
+Copy-Item deploy\.env.server.example .env
+Copy-Item deploy\.env.local.server.example .env.local
+notepad .env
+notepad .env.local
+powershell -ExecutionPolicy Bypass -File .\deploy\publish-server.ps1
+```
+
+Manuel komut:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+Kontrol:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f matching-api
+Invoke-RestMethod -Uri "http://localhost/health" -Method Get
+```
+
+Erisim:
+
+- API: `http://SUNUCU_IP/`
+- UI: `http://SUNUCU_IP/ui/`
+
 ## Debug
 
 - API: `npm run debug:api`

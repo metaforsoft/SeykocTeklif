@@ -11,7 +11,9 @@ services:
       ocr-service:
         condition: service_started
     env_file:
-      - .env
+      - path: .env
+      - path: .env.local
+        required: false
     environment:
       OCR_SERVICE_URL: ${OCR_SERVICE_URL:-http://ocr-service:8090/ocr}
     working_dir: /app/apps/matching-api
