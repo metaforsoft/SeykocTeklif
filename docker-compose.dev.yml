@@ -1,0 +1,32 @@
+services:
+  matching-api-dev:
+    build:
+      context: .
+      dockerfile: apps/matching-api/Dockerfile
+    depends_on:
+      matching_db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ocr-service:
+        condition: service_started
+    env_file:
+      - path: .env
+      - path: .env.local
+        required: false
+    environment:
+      OCR_SERVICE_URL: ${OCR_SERVICE_URL:-http://ocr-service:8090/ocr}
+    working_dir: /app/apps/matching-api
+    command:
+      - sh
+      - -lc
+      - npm install && node --watch -r ts-node/register src/index.ts
+    volumes:
+      - .:/app
+      - stock_matching_platform_node_modules:/app/node_modules
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
+volumes:
+  stock_matching_platform_node_modules:

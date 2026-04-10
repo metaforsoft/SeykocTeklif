@@ -37,10 +37,15 @@ export const env = {
       stockName2: optional("ERP_COL_STOCK_NAME2", "stock_name2"),
       description: optional("ERP_COL_DESCRIPTION", "description"),
       category1: optional("ERP_COL_CATEGORY1", "category1"),
+      birim: optional("ERP_COL_BIRIM", "Birim"),
       en: optional("ERP_COL_EN", "En"),
       boy: optional("ERP_COL_BOY", "Boy"),
       yukseklik: optional("ERP_COL_YUKSEKLIK", "Yükseklik"),
       cap: optional("ERP_COL_CAP", "Çap"),
+      specificGravity: optional("ERP_COL_SPECIFIC_GRAVITY", "Özgül Ağırlık"),
+      cinsi: optional("ERP_COL_CINSI", "Cinsi"),
+      alasim: optional("ERP_COL_ALASIM", "Alaşım"),
+      tamper: optional("ERP_COL_TAMPER", "Tamper"),
       updatedAt: process.env["ERP_COL_UPDATED_AT"] ?? "updated_at"
     }
   },
@@ -58,6 +63,13 @@ export const env = {
   erpOffer: {
     endpoint: process.env["ERP_OFFER_ENDPOINT"] ?? process.env["ERP_ORDER_ENDPOINT"] ?? "",
     apiKey: process.env["ERP_OFFER_API_KEY"] ?? process.env["ERP_ORDER_API_KEY"] ?? ""
+  },
+  uyumLookup: {
+    baseUrl: process.env["UYUM_LOOKUP_BASE_URL"] ?? "",
+    user: process.env["UYUM_LOOKUP_USER"] ?? "",
+    password: process.env["UYUM_LOOKUP_PASSWORD"] ?? "",
+    bearerToken: process.env["UYUM_LOOKUP_BEARER_TOKEN"] ?? "",
+    secretKey: process.env["UYUM_LOOKUP_SECRET_KEY"] ?? ""
   },
   orderDispatch: {
     intervalSeconds: Number(optional("ORDER_DISPATCH_INTERVAL_SECONDS", "15")),

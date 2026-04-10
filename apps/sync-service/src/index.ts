@@ -10,10 +10,15 @@ interface ErpRawRow {
   stock_name2: string | null;
   description: string | null;
   category1: string | null;
+  birim: string | null;
   erp_en: number | null;
   erp_boy: number | null;
   erp_yukseklik: number | null;
   erp_cap: number | null;
+  specific_gravity: number | null;
+  cinsi: string | null;
+  alasim: string | null;
+  tamper: string | null;
   updated_at: Date | null;
 }
 
@@ -31,10 +36,15 @@ function selectClause(): string {
     colOrNull(c.stockName2, "stock_name2"),
     colOrNull(c.description, "description"),
     colOrNull(c.category1, "category1"),
+    colOrNull(c.birim, "birim"),
     numOrNull(c.en, "erp_en"),
     numOrNull(c.boy, "erp_boy"),
     numOrNull(c.yukseklik, "erp_yukseklik"),
-    numOrNull(c.cap, "erp_cap")
+    numOrNull(c.cap, "erp_cap"),
+    numOrNull(c.specificGravity, "specific_gravity"),
+    colOrNull(c.cinsi, "cinsi"),
+    colOrNull(c.alasim, "alasim"),
+    colOrNull(c.tamper, "tamper")
   ];
 
   if (c.updatedAt && c.updatedAt.trim().length > 0) {
@@ -90,17 +100,47 @@ async function upsertStockMaster(rows: StockMasterRow[]): Promise<void> {
     await client.query("BEGIN");
     for (const r of rows) {
       await client.query(
-        `INSERT INTO stock_master(stock_id, stock_code, stock_name, stock_name2, description, category1, updated_at, is_active)
-         VALUES($1,$2,$3,$4,$5,$6,$7,TRUE)
+        `INSERT INTO stock_master(
+           stock_id, stock_code, stock_name, stock_name2, description, category1, birim,
+           erp_en, erp_boy, erp_yukseklik, erp_cap, specific_gravity, cinsi, alasim, tamper,
+           updated_at, is_active
+         )
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,TRUE)
          ON CONFLICT(stock_id) DO UPDATE SET
            stock_code=EXCLUDED.stock_code,
            stock_name=EXCLUDED.stock_name,
            stock_name2=EXCLUDED.stock_name2,
            description=EXCLUDED.description,
            category1=EXCLUDED.category1,
-           updated_at=EXCLUDED.updated_at,
-           is_active=TRUE`,
-        [r.stock_id, r.stock_code, r.stock_name, r.stock_name2, r.description, r.category1, r.updated_at]
+           birim=EXCLUDED.birim,
+           erp_en=EXCLUDED.erp_en,
+           erp_boy=EXCLUDED.erp_boy,
+           erp_yukseklik=EXCLUDED.erp_yukseklik,
+            erp_cap=EXCLUDED.erp_cap,
+            specific_gravity=EXCLUDED.specific_gravity,
+            cinsi=EXCLUDED.cinsi,
+            alasim=EXCLUDED.alasim,
+            tamper=EXCLUDED.tamper,
+            updated_at=EXCLUDED.updated_at,
+             is_active=TRUE`,
+        [
+          r.stock_id,
+          r.stock_code,
+          r.stock_name,
+          r.stock_name2,
+          r.description,
+          r.category1,
+          r.birim ?? null,
+          r.erp_en ?? null,
+          r.erp_boy ?? null,
+          r.erp_yukseklik ?? null,
+          r.erp_cap ?? null,
+          r.specific_gravity ?? null,
+          r.cinsi ?? null,
+          r.alasim ?? null,
+          r.tamper ?? null,
+          r.updated_at
+        ]
       );
     }
     await client.query("COMMIT");
@@ -154,6 +194,80 @@ async function upsertFeatures(rows: StockMasterRow[]): Promise<void> {
   }
 }
 
+function stockFamilyFromCode(code: string | null | undefined): string | null {
+  if (!code) return null;
+  const prefix = String(code).trim().split(".")[0]?.trim().toUpperCase() ?? "";
+  return prefix || null;
+}
+
+async function upsertCanonicalFeatures(rows: StockMasterRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const client = await matchPool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const r of rows) {
+      const f = extractFeaturesFromStock(r);
+      const dims = [f.dim1, f.dim2, f.dim3].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+      const sortedDims = [...dims].sort((a, b) => a - b);
+      await client.query(
+        `INSERT INTO canonical_stock_features(
+           stock_id, stock_family, product_type, series, series_group, temper,
+           thickness, width, length, height, diameter, unit, raw_attributes_json, search_text, schema_version, normalized_at
+         )
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,1,NOW())
+         ON CONFLICT(stock_id) DO UPDATE SET
+           stock_family=EXCLUDED.stock_family,
+           product_type=EXCLUDED.product_type,
+           series=EXCLUDED.series,
+           series_group=EXCLUDED.series_group,
+           temper=EXCLUDED.temper,
+           thickness=EXCLUDED.thickness,
+           width=EXCLUDED.width,
+           length=EXCLUDED.length,
+           height=EXCLUDED.height,
+           diameter=EXCLUDED.diameter,
+           unit=EXCLUDED.unit,
+           raw_attributes_json=EXCLUDED.raw_attributes_json,
+           search_text=EXCLUDED.search_text,
+           schema_version=EXCLUDED.schema_version,
+           normalized_at=EXCLUDED.normalized_at`,
+        [
+          r.stock_id,
+          stockFamilyFromCode(r.stock_code),
+          f.product_type,
+          f.series,
+          f.series_group,
+          f.temper,
+          sortedDims[0] ?? null,
+          sortedDims[1] ?? null,
+          sortedDims[2] ?? null,
+          r.erp_yukseklik ?? null,
+          r.erp_cap ?? null,
+          r.birim ?? null,
+          JSON.stringify({
+            stock_code: r.stock_code,
+            stock_name: r.stock_name,
+            erp_en: r.erp_en ?? null,
+            erp_boy: r.erp_boy ?? null,
+            erp_yukseklik: r.erp_yukseklik ?? null,
+            erp_cap: r.erp_cap ?? null,
+            cinsi: r.cinsi ?? null,
+            alasim: r.alasim ?? null,
+            tamper: r.tamper ?? null
+          }),
+          f.search_text
+        ]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 async function runSync(): Promise<void> {
   const started = Date.now();
   const hasIncremental = env.erp.columns.updatedAt && env.erp.columns.updatedAt.trim().length > 0;
@@ -167,16 +281,22 @@ async function runSync(): Promise<void> {
     stock_name2: r.stock_name2,
     description: r.description,
     category1: r.category1,
+    birim: r.birim,
     erp_en: r.erp_en,
     erp_boy: r.erp_boy,
     erp_yukseklik: r.erp_yukseklik,
     erp_cap: r.erp_cap,
+    specific_gravity: r.specific_gravity,
+    cinsi: r.cinsi,
+    alasim: r.alasim,
+    tamper: r.tamper,
     updated_at: r.updated_at ? new Date(r.updated_at) : null,
     is_active: true
   }));
 
   await upsertStockMaster(mapped);
   await upsertFeatures(mapped);
+  await upsertCanonicalFeatures(mapped);
 
   if (!hasIncremental) {
     await markInactiveMissing(mapped.map((m) => m.stock_id));

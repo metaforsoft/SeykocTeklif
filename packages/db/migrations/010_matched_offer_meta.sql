@@ -1,0 +1,6 @@
+ALTER TABLE matched_offers
+  ADD COLUMN IF NOT EXISTS offer_date DATE NULL,
+  ADD COLUMN IF NOT EXISTS movement_code TEXT NULL,
+  ADD COLUMN IF NOT EXISTS customer_code TEXT NULL,
+  ADD COLUMN IF NOT EXISTS representative_code TEXT NULL,
+  ADD COLUMN IF NOT EXISTS description TEXT NULL;

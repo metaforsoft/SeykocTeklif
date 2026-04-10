@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Yönetim Paneli</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/portal/portal.css?v=20260408f" />
+</head>
+<body class="portal-body">
+  <div class="portal-layout">
+    <aside class="portal-sidebar">
+      <div class="sidebar-brand">
+        <span class="eyebrow">Seykoc</span>
+        <strong>Teklif Paneli</strong>
+      </div>
+      <nav id="sidebarNav" class="sidebar-nav"></nav>
+      <button id="logoutBtn" class="btn-secondary sidebar-logout" type="button">Çıkış Yap</button>
+    </aside>
+    <div class="portal-main">
+      <header class="portal-header">
+        <div>
+          <p id="pageEyebrow" class="eyebrow">Panel</p>
+          <h1 id="pageTitle">Yükleniyor...</h1>
+        </div>
+        <div class="header-user">
+          <strong id="currentUserName">-</strong>
+          <span id="currentUserMeta">-</span>
+        </div>
+      </header>
+      <section id="pageContent" class="page-content"></section>
+    </div>
+  </div>
+  <script src="/portal/portal-app.js?v=20260408f"></script>
+</body>
+</html>

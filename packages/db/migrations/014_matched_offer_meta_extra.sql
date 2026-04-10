@@ -1,0 +1,5 @@
+ALTER TABLE matched_offers
+  ADD COLUMN IF NOT EXISTS warehouse_code TEXT NULL,
+  ADD COLUMN IF NOT EXISTS payment_plan_code TEXT NULL,
+  ADD COLUMN IF NOT EXISTS incoterm_name TEXT NULL,
+  ADD COLUMN IF NOT EXISTS delivery_date DATE NULL;
