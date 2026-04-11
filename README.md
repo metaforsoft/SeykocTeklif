@@ -345,6 +345,40 @@ Erisim:
 - API: `http://SUNUCU_IP/`
 - UI: `http://SUNUCU_IP/ui/`
 
+## Deploy Paketi
+
+Tum repo yerine sadece yayin icin gereken dosyalari tasimak isterseniz deploy paketi kullanin.
+
+Paket olusturma:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\create-deploy-package.ps1
+```
+
+Olusan ciktilar:
+
+- `out/stock-matching-platform-deploy/`
+- `out/stock-matching-platform-deploy.zip`
+
+Bu paket sunlari icerir:
+
+- build edilmis `dist` klasorleri
+- runtime Dockerfile (`Dockerfile.runtime`)
+- package compose dosyasi (`docker-compose.package.yml`)
+- migration SQL dosyalari
+- OCR servis dosyalari
+- deploy env ornekleri ve yayin scripti
+
+Sunucuda ZIP'i acip paket klasoru icinde su komutlari calistirin:
+
+```powershell
+Copy-Item .\deploy\.env.server.example .\.env
+Copy-Item .\deploy\.env.local.server.example .\.env.local
+notepad .env
+notepad .env.local
+powershell -ExecutionPolicy Bypass -File .\deploy\publish-package.ps1
+```
+
 ## Debug
 
 - API: `npm run debug:api`

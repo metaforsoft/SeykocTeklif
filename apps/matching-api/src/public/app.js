@@ -102,6 +102,44 @@ function mergeMatchPolicy(nextPolicy) {
   };
 }
 
+function resetInstructionState() {
+  pendingChatLearning = null;
+  activeMatchPolicy = null;
+  activeRowDefaults = null;
+  if (instructionTextEl) instructionTextEl.value = "";
+  if (matchInstructionTextEl) matchInstructionTextEl.value = "";
+}
+
+function isClearInstructionStateCommand(message) {
+  const normalized = String(message || "")
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ı/g, "i")
+    .trim();
+
+  return /\b(filtreleri|filtreyi|talimatlari|talimati|komutlari|komutu)\s+temizle\b/i.test(normalized)
+    || /\b(eslestirme|eşleştirme)\s+filtresini\s+temizle\b/i.test(normalized)
+    || /\bsifirla\b/i.test(normalized);
+}
+
+function describeActiveMatchPolicy(policy) {
+  if (!policy) return "";
+  const parts = [];
+  if (policy.stockCodePrefix) parts.push(`stok kodu ${policy.stockCodePrefix} ile başlayanlar`);
+  if (policy.preferredSeries) parts.push(`alaşım ${policy.preferredSeries}`);
+  if (policy.preferredTemper) parts.push(`temper ${policy.preferredTemper}`);
+  if (policy.preferredProductType) parts.push(`tip ${policy.preferredProductType}`);
+  if (Array.isArray(policy.requiredStockCodeTerms) && policy.requiredStockCodeTerms.length) {
+    parts.push(`stok kodunda ${policy.requiredStockCodeTerms.join(", ")}`);
+  }
+  if (Array.isArray(policy.requiredStockNameTerms) && policy.requiredStockNameTerms.length) {
+    parts.push(`stok adında ${policy.requiredStockNameTerms.join(", ")}`);
+  }
+  if (parts.length === 0) return "";
+  return parts.join(" | ");
+}
+
 function parseInstructionTargetScope(message) {
   const normalized = String(message || "")
     .toLocaleLowerCase("tr-TR")
@@ -965,6 +1003,12 @@ function mergeRowDefaults(nextDefaults) {
 }
 
 async function rerunMatchingByInstruction(message, options = {}) {
+  if (isClearInstructionStateCommand(message)) {
+    resetInstructionState();
+    appendInstructionMessage("assistant", "Aktif eşleştirme filtresi ve sohbet talimat bağlamı temizlendi.");
+    return;
+  }
+
   const response = await api("/instructions/plan", "POST", {
     message,
     rowCount: rows.length,
@@ -1082,9 +1126,15 @@ async function rerunMatchingByInstruction(message, options = {}) {
     const notes = describeInstructionCommands(instructionResult.applied, plan.ignoredRowCommands || []);
     const overrideNote = notes.length ? ` Uygulanan komutlar: ${notes.join(" | ")}.` : "";
     const learnNote = pendingChatLearning ? " Bu talimat, Seçimleri Kaydet sonrası policy adayı olarak değerlendirilecek." : "";
+    const activeFilterNote = !plan.matchPolicy && currentMatchPolicy()
+      ? ` Aktif eşleştirme filtresi korunuyor: ${describeActiveMatchPolicy(currentMatchPolicy())}.`
+      : "";
+    const alreadyAppliedNote = !willRerun && Array.isArray(plan.rowCommands) && plan.rowCommands.length > 0 && instructionResult.changedRows === 0
+      ? " Değişiklik yapılmadı; bu komut ilgili satırlarda zaten uygulanmış."
+      : "";
     appendInstructionMessage("assistant", willRerun
-      ? `Tamamlandı. ${(targetIndexes.length > 0 ? targetIndexes.length : rows.length)} satır güncellendi.${overrideNote}${learnNote}`
-      : `Tamamlandı. ${instructionResult.changedRows} satır güncellendi.${overrideNote}${learnNote}`);
+      ? `Tamamlandı. ${(targetIndexes.length > 0 ? targetIndexes.length : rows.length)} satır güncellendi.${overrideNote}${learnNote}${activeFilterNote}`
+      : `Tamamlandı. ${instructionResult.changedRows} satır güncellendi.${overrideNote}${alreadyAppliedNote}${learnNote}${activeFilterNote}`);
   } catch (err) {
     appendInstructionMessage("assistant", `İşlem başarısız: ${err.message}`);
   } finally {
@@ -1097,11 +1147,7 @@ function setMode(mode) {
   extractedDoc = null;
   offerDraftId = null;
   rows = [];
-  pendingChatLearning = null;
-  activeMatchPolicy = null;
-  activeRowDefaults = null;
-  if (instructionTextEl) instructionTextEl.value = "";
-  if (matchInstructionTextEl) matchInstructionTextEl.value = "";
+  resetInstructionState();
   renderTable();
   if (mode === "text") {
     textWrap.classList.remove("hidden");

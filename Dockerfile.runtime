@@ -1,0 +1,20 @@
+FROM node:20-alpine
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY apps/matching-api/package.json ./apps/matching-api/package.json
+COPY apps/sync-service/package.json ./apps/sync-service/package.json
+COPY apps/order-dispatcher/package.json ./apps/order-dispatcher/package.json
+COPY packages/common/package.json ./packages/common/package.json
+COPY packages/db/package.json ./packages/db/package.json
+
+RUN npm ci --omit=dev
+
+COPY apps/matching-api/dist ./apps/matching-api/dist
+COPY apps/sync-service/dist ./apps/sync-service/dist
+COPY apps/order-dispatcher/dist ./apps/order-dispatcher/dist
+COPY packages/common/dist ./packages/common/dist
+COPY packages/db/dist ./packages/db/dist
+COPY packages/db/migrations ./packages/db/migrations
+
+CMD ["npm", "run", "-w", "@smp/matching-api", "start"]
