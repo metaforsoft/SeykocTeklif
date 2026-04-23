@@ -96,8 +96,53 @@ body {
   gap: 6px;
 }
 
-.rule-form-wide {
+.rule-form-wide,
+.rule-form-full {
   grid-column: 1 / -1;
+}
+
+.rule-panel-block {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.rule-panel-block h3 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+  color: #29496b;
+}
+
+.rule-form-grid label > span {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #334e68;
+  display: block;
+  margin-bottom: 4px;
+}
+
+#ruleListTable {
+  min-width: auto;
+  table-layout: fixed;
+  font-size: 0.82rem;
+}
+
+#ruleListTable th,
+#ruleListTable td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e6edf5;
+  vertical-align: top;
+  white-space: normal;
+  word-break: break-word;
+}
+
+#ruleListTable th {
+  background: #f0f4f8;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #334e68;
+  font-weight: 700;
 }
 
 .rule-table-wrap {

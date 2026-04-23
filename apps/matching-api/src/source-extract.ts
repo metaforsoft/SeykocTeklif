@@ -1,4 +1,4 @@
-﻿import mammoth from "mammoth";
+import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 import Tesseract from "tesseract.js";
 import * as XLSX from "xlsx";
@@ -14,7 +14,7 @@ const likelyOrderLinePattern = /\d{1,4}\s*[xX*]\s*\d{1,4}/;
 const likelyFuzzyTriplePattern = /\b\d{1,4}\D{0,8}\d{1,4}\D{0,8}\d{1,4}\b/;
 const likelyQtyPattern = /\b\d{1,3}\s*(?:ad\.?|adet|a[d1i]\.?)\b/i;
 const likelySeriesHeaderPattern = /\b(?:AL|AA|A1)\s*[1-9]\d{3}\b/i;
-const hardNoisePattern = /(mesaj|iletildi|Ã§arÅŸamba|carsamba|gÃ¼naydÄ±n|gunaydin|mailden|iÅŸleme alacaÄŸÄ±m|isleme alacagim|tamamdÄ±r|tamamdir|polinet|lte|whatsapp|vo\)|^\d{1,2}:\d{2}$)/i;
+const hardNoisePattern = /(mesaj|iletildi|çarşamba|carsamba|günaydın|gunaydin|mailden|işleme alacağım|isleme alacagim|tamamdır|tamamdir|polinet|lte|whatsapp|vo\)|^\d{1,2}:\d{2}$)/i;
 
 function normalizeExtractedText(raw: string): string {
   return raw
@@ -92,7 +92,7 @@ function normalizeHeaderName(value: unknown): string {
     .toLocaleLowerCase("tr-TR")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/Ä±/g, "i")
+    .replace(/ı/g, "i")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
@@ -114,20 +114,20 @@ function buildInstructionPatterns(instruction: string | null | undefined, bucket
 
   const hints: string[] = [];
   const keywordMap: Record<typeof bucket, string[]> = {
-    qty: ["mikt", "miktar", "adet", "ad", "qty", "quantity", "mik"],
-    x: ["x", "x yonu", "en", "genislik"],
-    y: ["y", "y yonu", "ic cap", "ick ap", "kalinlik"],
-    z: ["z", "z yonu", "boy", "uzunluk"],
+    qty: ["mikt", "miktar", "adet", "qty", "quantity", "mik"],
+    x: ["x yonu", "en", "genislik"],
+    y: ["y yonu", "ic cap", "ick ap", "kalinlik"],
+    z: ["z yonu", "boy", "uzunluk"],
     material: ["malzeme", "seri", "alasim"],
     part: ["parca", "parca numarasi", "kod", "ref"],
     desc: ["aciklama", "not", "tanim"]
   };
 
-  if (!keywordMap[bucket].some((token) => normalized.includes(token))) {
+  if (!keywordMap[bucket].some((token) => new RegExp(`\\b${token.replace(/\s+/g, "\\s+")}\\b`).test(normalized))) {
     return [];
   }
 
-  const headerMatches = normalized.match(/["â€œâ€']?([a-z0-9]+(?:\s+[a-z0-9]+){0,3})["â€œâ€']?\s*(?:kolon|alan|sutun|sÃ¼tun|header|baslik|baÅŸlÄ±k)/g) ?? [];
+  const headerMatches = normalized.match(/["â€œâ€ ']?([a-z0-9]+(?:\s+[a-z0-9]+){0,3})["â€œâ€ ']?\s*(?:kolon|alan|sutun|sÃ¼tun|header|baslik|baÅŸlÄ±k)/g) ?? [];
   for (const match of headerMatches) {
     const cleaned = normalizeHeaderName(match)
       .replace(/\b(kolon|alan|sutun|sÃ¼tun|header|baslik|baÅŸlÄ±k)\b/g, "")
@@ -135,7 +135,7 @@ function buildInstructionPatterns(instruction: string | null | undefined, bucket
     if (cleaned) hints.push(cleaned);
   }
 
-  const explicitTokens = normalized.match(/\b(?:qty|quantity|mik|mikt|miktar|adet|ad|x|y|z|x yonu|y yonu|z yonu|malzeme|seri|alasim|parca numarasi|kod|ref|aciklama|not|tanim)\b/g) ?? [];
+  const explicitTokens = normalized.match(/\b(?:qty|quantity|mik|mikt|miktar|adet|x yonu|y yonu|z yonu|en|genislik|kalinlik|boy|uzunluk|malzeme|seri|alasim|parca numarasi|kod|ref|aciklama|not|tanim)\b/g) ?? [];
   for (const token of explicitTokens) {
     if (!hints.includes(token)) hints.push(token);
   }
@@ -145,7 +145,117 @@ function buildInstructionPatterns(instruction: string | null | undefined, bucket
     .map((hint) => new RegExp(`\\b${hint.replace(/\s+/g, "\\s+")}\\b`));
 }
 
-function buildExcelDocument(workbook: XLSX.WorkBook, instruction?: string | null): ParsedOrderDocument | null {
+const openAiApiKey = process.env["OPENAI_API_KEY"]?.trim() ?? "";
+const openAiModel = process.env["OPENAI_STRUCTURED_MODEL"]?.trim() || "gpt-4.1-mini";
+
+interface ColumnMapping {
+  qtyIndex: number;
+  xIndex: number;
+  yIndex: number;
+  zIndex: number;
+  materialIndex: number;
+  partIndex: number;
+  descIndex: number;
+}
+
+async function resolveColumnMappingWithLlm(
+  rawHeaders: unknown[],
+  sampleRows: unknown[][],
+  instruction: string | null | undefined
+): Promise<ColumnMapping | null> {
+  if (!openAiApiKey) return null;
+
+  try {
+    const headerList = rawHeaders.map((h, i) => `${i}: "${String(h ?? "")}"`).join("\n");
+    const sampleData = sampleRows.slice(0, 3).map((row, ri) =>
+      `Satır ${ri + 1}: ${(row as unknown[]).map((cell, ci) => `[${ci}]=${String(cell ?? "")}`).join(", ")}`
+    ).join("\n");
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openAiApiKey}`
+      },
+      body: JSON.stringify({
+        model: openAiModel,
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Bir alüminyum/metal sipariş Excel dosyasının kolon başlıklarını analiz ediyorsun.",
+              "Her kolon için aşağıdaki alanlardan birine eşleme yap. Eşleşme yoksa -1 döndür.",
+              "",
+              "Alanlar:",
+              "- qtyIndex: Miktar/adet kolonu (sipariş edilen parça sayısı)",
+              "- xIndex: En/genişlik boyutu kolonu (mm, X yönü)",
+              "- yIndex: Kalınlık/et kalınlığı boyutu kolonu (mm, Y yönü, genellikle en küçük boyut)",
+              "- zIndex: Boy/uzunluk boyutu kolonu (mm, Z yönü, genellikle en büyük boyut)",
+              "- materialIndex: Malzeme/alaşım/seri kolonu (örn: 6000 AL, 5083, AA6061)",
+              "- partIndex: Parça numarası/referans kodu kolonu",
+              "- descIndex: Açıklama/tanım/not kolonu",
+              "",
+              "Kurallar:",
+              "- Kolon başlığı VE örnek veriye birlikte bakarak karar ver.",
+              "- Kullanıcı talimatı varsa ona öncelik ver.",
+              "- Aynı kolonu birden fazla alana ATAMA.",
+              "- Boyut değerlerinden hangisinin kalınlık/en/boy olduğunu değerlere bakarak tahmin et."
+            ].join("\n")
+          },
+          {
+            role: "user",
+            content: [
+              "Kolon başlıkları:",
+              headerList,
+              "",
+              "Örnek veriler:",
+              sampleData,
+              "",
+              instruction ? `Kullanıcı talimatı: ${instruction}` : ""
+            ].filter(Boolean).join("\n")
+          }
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "column_mapping",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                qtyIndex: { type: "integer" },
+                xIndex: { type: "integer" },
+                yIndex: { type: "integer" },
+                zIndex: { type: "integer" },
+                materialIndex: { type: "integer" },
+                partIndex: { type: "integer" },
+                descIndex: { type: "integer" },
+                reasoning: { type: "string" }
+              },
+              required: ["qtyIndex", "xIndex", "yIndex", "zIndex", "materialIndex", "partIndex", "descIndex", "reasoning"]
+            }
+          }
+        }
+      })
+    });
+
+    if (!response.ok) return null;
+
+    const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content) as ColumnMapping & { reasoning: string };
+    console.log("[LLM column mapping]", parsed.reasoning);
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function buildExcelDocument(workbook: XLSX.WorkBook, instruction?: string | null): Promise<ParsedOrderDocument | null> {
   const items: ParsedOrderLine[] = [];
   const extractedLines: string[] = [];
 
@@ -158,14 +268,36 @@ function buildExcelDocument(workbook: XLSX.WorkBook, instruction?: string | null
     });
     if (rows.length < 2) continue;
 
-    const headers = (rows[0] ?? []).map((cell) => normalizeHeaderName(cell));
-    const qtyIndex = findColumnIndex(headers, [/\bmikt\b/, /\bmiktar\b/, /\bmik\b/, /\badet\b/, /\bad\b/, /\bqty\b/, /\bquantity\b/, ...buildInstructionPatterns(instruction, "qty")]);
-    const xIndex = findColumnIndex(headers, [/\bx yonu\b/, /^x$/, /\ben\b/, /\bgenislik\b/, ...buildInstructionPatterns(instruction, "x")]);
-    const yIndex = findColumnIndex(headers, [/\by yonu\b/, /^y$/, /\bick ap\b/, /\bic cap\b/, /\bkalinlik\b/, ...buildInstructionPatterns(instruction, "y")]);
-    const zIndex = findColumnIndex(headers, [/\bz yonu\b/, /^z$/, /\bboy\b/, /\buzunluk\b/, ...buildInstructionPatterns(instruction, "z")]);
-    const materialIndex = findColumnIndex(headers, [/\bmalzeme\b/, /\bseri\b/, /\balasim\b/, ...buildInstructionPatterns(instruction, "material")]);
-    const partIndex = findColumnIndex(headers, [/\bparca numarasi\b/, /\bkod\b/, /\bref\b/, ...buildInstructionPatterns(instruction, "part")]);
-    const descIndex = findColumnIndex(headers, [/\baciklama\b/, /\bnot\b/, /\btanim\b/, ...buildInstructionPatterns(instruction, "desc")]);
+    const rawHeaders = rows[0] as unknown[];
+    const headers = rawHeaders.map((cell) => normalizeHeaderName(cell));
+
+    let qtyIndex: number;
+    let xIndex: number;
+    let yIndex: number;
+    let zIndex: number;
+    let materialIndex: number;
+    let partIndex: number;
+    let descIndex: number;
+
+    const llmMapping = await resolveColumnMappingWithLlm(rawHeaders, rows.slice(1) as unknown[][], instruction);
+
+    if (llmMapping) {
+      qtyIndex = llmMapping.qtyIndex;
+      xIndex = llmMapping.xIndex;
+      yIndex = llmMapping.yIndex;
+      zIndex = llmMapping.zIndex;
+      materialIndex = llmMapping.materialIndex;
+      partIndex = llmMapping.partIndex;
+      descIndex = llmMapping.descIndex;
+    } else {
+      qtyIndex = findColumnIndex(headers, [/\bmikt\b/, /\bmiktar\b/, /\bmik\b/, /\badet\b/, /\bad\b/, /\bqty\b/, /\bquantity\b/, ...buildInstructionPatterns(instruction, "qty")]);
+      xIndex = findColumnIndex(headers, [/\bx yonu\b/, /^x$/, /\ben\b/, /\bgenislik\b/, ...buildInstructionPatterns(instruction, "x")]);
+      yIndex = findColumnIndex(headers, [/\by yonu\b/, /^y$/, /\bick ap\b/, /\bic cap\b/, /\bkalinlik\b/, ...buildInstructionPatterns(instruction, "y")]);
+      zIndex = findColumnIndex(headers, [/\bz yonu\b/, /^z$/, /\bboy\b/, /\buzunluk\b/, ...buildInstructionPatterns(instruction, "z")]);
+      materialIndex = findColumnIndex(headers, [/\bmalzeme\b/, /\bseri\b/, /\balasim\b/, ...buildInstructionPatterns(instruction, "material")]);
+      partIndex = findColumnIndex(headers, [/\bparca numarasi\b/, /\bkod\b/, /\bref\b/, ...buildInstructionPatterns(instruction, "part")]);
+      descIndex = findColumnIndex(headers, [/\baciklama\b/, /\bnot\b/, /\btanim\b/, ...buildInstructionPatterns(instruction, "desc")]);
+    }
 
     const usableDimIndexes = [xIndex, yIndex, zIndex].filter((index) => index >= 0);
     if (usableDimIndexes.length < 2) continue;
@@ -348,6 +480,55 @@ function lineRichnessScore(item: ParsedOrderLine): number {
   return score;
 }
 
+function recomputeParserConfidence(items: ParsedOrderLine[]): number {
+  return items.length > 0
+    ? Number((items.reduce((sum, item) => sum + item.confidence, 0) / items.length).toFixed(3))
+    : 0;
+}
+
+function imageLineIdentity(item: ParsedOrderLine): string {
+  return [
+    item.dim_text ?? "",
+    item.series ?? "",
+    item.header_context ?? ""
+  ].join("|");
+}
+
+function choosePreferredImageLine(current: ParsedOrderLine, candidate: ParsedOrderLine): ParsedOrderLine {
+  if (current.qty === null && candidate.qty !== null) return candidate;
+  if (current.qty !== null && candidate.qty === null) return current;
+  return lineRichnessScore(candidate) > lineRichnessScore(current) ? candidate : current;
+}
+
+function consolidateImageLines(items: ParsedOrderLine[]): ParsedOrderLine[] {
+  const grouped = new Map<string, ParsedOrderLine[]>();
+
+  for (const item of items) {
+    const key = imageLineIdentity(item);
+    const bucket = grouped.get(key) ?? [];
+    const existingIndex = bucket.findIndex((entry) => entry.qty === item.qty || entry.qty === null || item.qty === null);
+
+    if (existingIndex >= 0) {
+      bucket[existingIndex] = choosePreferredImageLine(bucket[existingIndex], item);
+    } else {
+      bucket.push(item);
+    }
+
+    grouped.set(key, bucket);
+  }
+
+  return [...grouped.values()].flat();
+}
+
+function finalizeImageDocument(doc: ParsedOrderDocument): ParsedOrderDocument {
+  const items = consolidateImageLines(doc.items);
+  return {
+    ...doc,
+    items,
+    parser_confidence: recomputeParserConfidence(items)
+  };
+}
+
 function mergeParsedDocuments(primary: ParsedOrderDocument, secondary: ParsedOrderDocument, method: string): ParsedOrderDocument {
   const merged = new Map<string, ParsedOrderLine>();
   const upsert = (item: ParsedOrderLine) => {
@@ -367,9 +548,7 @@ function mergeParsedDocuments(primary: ParsedOrderDocument, secondary: ParsedOrd
   secondary.items.forEach(upsert);
 
   const items = [...merged.values()];
-  const parserConfidence = items.length > 0
-    ? Number((items.reduce((sum, item) => sum + item.confidence, 0) / items.length).toFixed(3))
-    : 0;
+  const parserConfidence = recomputeParserConfidence(items);
 
   return {
     ...primary,
@@ -497,7 +676,7 @@ export async function extractSourceDocument(input: {
       ?? matchedInstructionPolicy?.policy_json?.extractionPrompt
       ?? matchedProfile?.instruction_text
       ?? null;
-    const excelDoc = buildExcelDocument(workbook, effectiveInstruction);
+    const excelDoc = await buildExcelDocument(workbook, effectiveInstruction);
     if (excelDoc) {
       return {
         ...excelDoc,
@@ -550,7 +729,7 @@ export async function extractSourceDocument(input: {
     let llmTextError: string | null = null;
     let llmImageError: string | null = null;
     const candidateLineCount = estimateImageCandidateLineCount(extracted.text);
-    const expectedItemCount = parseExpectedItemCount(effectiveInstruction);
+    const expectedItemCount = parseExpectedItemCount(normalizedInstruction);
     const parserLooksIncomplete = candidateLineCount >= Math.max(parsed.items.length + 2, 4)
       || (expectedItemCount !== null && parsed.items.length < expectedItemCount);
 
@@ -593,7 +772,7 @@ export async function extractSourceDocument(input: {
       }
     }
 
-    return {
+    return finalizeImageDocument({
       ...parsed,
       learning: buildLearningMeta({
         fingerprint,
@@ -615,7 +794,7 @@ export async function extractSourceDocument(input: {
         llm_image_error: llmImageError,
         ocr_error: extracted.errors.ocr_error
       }
-    };
+    });
   }
 
   const extractedText = await extractTextFromOfficeBuffer(buffer, input.fileName);

@@ -33,11 +33,23 @@ Kaynak `.ts` dosyalari, `.git`, `node_modules`, local env dosyalari pakete dahil
 ZIP dosyasini sunucuya kopyalayin ve acin. Sonra paket klasoru icinde:
 
 ```powershell
-Copy-Item .\deploy\.env.server.example .\.env
-Copy-Item .\deploy\.env.local.server.example .\.env.local
-notepad .env
-notepad .env.local
 powershell -ExecutionPolicy Bypass -File .\deploy\publish-package.ps1
+```
+
+Script ilk calistirmada `.env` ve `.env.local` yoksa orneklerden olusturur ve durur. Bu projede ERP baglanti bilgileri ayni kalacaksa genelde sadece `MATCH_PG_HOST`, `MATCH_PG_PORT`, `MATCH_PG_DB`, `MATCH_PG_USER`, `MATCH_PG_PASSWORD` alanlarini degistirmeniz yeterlidir.
+
+Varsayilan davranis:
+
+- eski containerlari kapatir
+- PostgreSQL volume'unu siler
+- sifirdan veritabani olusturur
+- migrationlari calistirir
+- admin disindaki tum uygulama kullanicilarini siler
+
+Bu nedenle ilk kurulum ve tam reset icin dogrudan uygundur. Veritabani korunacaksa:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\publish-package.ps1 -ResetDatabase:$false -EnforceAdminOnly:$false
 ```
 
 Manuel komut:
@@ -58,3 +70,4 @@ Erisim:
 
 - `http://SUNUCU_IP/`
 - `http://SUNUCU_IP/ui/`
+- ilk giris: `admin / admin`

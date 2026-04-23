@@ -3,10 +3,10 @@
 const DIM_REGEX = /(\d+(?:[\.,]\d+)?)\s*[x*]\s*(\d+(?:[\.,]\d+)?)(?:\s*[x*]\s*(\d+(?:[\.,]\d+)?))?/i;
 const DIM_FUZZY_REGEX = /(\d{1,4})\D{1,8}(\d{1,4})(?:\D{1,8}(\d{1,4}))?/i;
 const FUZZY_TRIPLE_HINT_REGEX = /\b\d{1,4}\D{1,8}\d{1,4}\D{1,8}\d{1,4}\b/i;
-const LABELED_DIM_REGEX = /(?:di[sÅŸ]\s*[Ã§c]ap)\s*(\d+(?:[\.,]\d+)?)\s*mm?.*?(?:i[Ã§c]\s*[Ã§c]ap)\s*(\d+(?:[\.,]\d+)?)\s*mm?.*?(?:boy)\s*(\d+(?:[\.,]\d+)?)\s*mm?/i;
+const LABELED_DIM_REGEX = /(?:di[sş]\s*[çc]ap)\s*(\d+(?:[\.,]\d+)?)\s*mm?.*?(?:i[çc]\s*[çc]ap)\s*(\d+(?:[\.,]\d+)?)\s*mm?.*?(?:boy)\s*(\d+(?:[\.,]\d+)?)\s*mm?/i;
 const QTY_REGEX = /(?:^|\s|>|-)(\d+(?:[\.,]\d+)?)\s*(ad\.?|adet|a[d1i]\.?|mik\.?|miktar)\b/i;
 const SERIES_HINT_REGEX = /\b([1-9]\d{3})(?:\s*serisi)?\b/gi;
-const CHAT_NOISE_REGEX = /(mesaj|iletildi|Ã§arÅŸamba|carsamba|gÃ¼naydÄ±n|gunaydin|mailden|iÅŸleme alacaÄŸÄ±m|isleme alacagim|tamamdÄ±r|tamamdir|polinet|whatsapp|lte|vo\)|%|\d{1,2}:\d{2})/i;
+const CHAT_NOISE_REGEX = /(mesaj|iletildi|çarşamba|carsamba|günaydın|gunaydin|mailden|işleme alacağım|isleme alacagim|tamamdır|tamamdir|polinet|whatsapp|lte|vo\)|%|\d{1,2}:\d{2})/i;
 const HEADER_SERIES_REGEX = /\b(?:AL|AA|A1)\s*([1-9]\d{3})\b/i;
 
 function splitLines(raw: string): string[] {
@@ -15,10 +15,10 @@ function splitLines(raw: string): string[] {
 
 function normalizeForParsing(line: string): string {
   return line
-    .replace(/[ÃƒÆ’Ã¢â‚¬â€Ãƒâ€”Ã—]/g, "x")
+    .replace(/[aƒÆ’a¢â‚¬â€aƒâ€”a—]/g, "x")
     .replace(/[*]/g, "x")
     .replace(/[><]/g, " ")
-    .replace(/[ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“Ã¢â‚¬â€Ã¢â‚¬â€œ]/g, "-")
+    .replace(/[aƒÂ¢a¢â€šÂ¬a¢â‚¬ÂaƒÂ¢a¢â€šÂ¬a¢â‚¬Å“a¢â‚¬â€a¢â‚¬â€œ]/g, "-")
     .replace(/(?<=\d)\s*[Xx]\s*(?=\d)/g, "x")
     .replace(/\b(\d{1,3})\s+(?=\d{1,4}\s*x)/gi, "$1")
     .replace(/(?<=x)\s+(?=\d)/gi, "")

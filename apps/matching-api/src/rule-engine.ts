@@ -5,6 +5,8 @@ export interface MatchingRuleRecord {
   rule_set_id: number;
   rule_set_name: string;
   priority: number;
+  scope_type: string | null;
+  scope_value: string | null;
   rule_type: "hard_filter" | "soft_boost";
   target_level: "input" | "candidate" | "pair";
   condition_json: RuleCondition;
@@ -24,7 +26,9 @@ export type RuleEffect =
   | { type: "require_exact_series" }
   | { type: "require_non_null"; field: string }
   | { type: "reject_prefix"; value: string }
-  | { type: "reject_if_missing_dimension"; dimension: "thickness" | "secondary" | "any" };
+  | { type: "reject_if_missing_dimension"; dimension: "thickness" | "secondary" | "any" }
+  | { type: "add_score"; value: number }
+  | { type: "multiply_score"; value: number };
 
 export interface RuleAuditEntry {
   ruleId: number;
@@ -51,11 +55,17 @@ function resolveField(path: string, input: ExtractedFromInput, candidate: Candid
     ? input as unknown as Record<string, unknown>
     : candidate as unknown as Record<string, unknown>;
   const normalizedPath = path.replace(/^(input|candidate)\./, "");
-  return normalizedPath.split(".").reduce<unknown>((acc, key) => {
+  const segments = normalizedPath.split(".");
+  // Güvenlik: max 4 seviye derinlik, geçersiz karakter içeren segment'ler reddedilir
+  if (segments.length > 4 || segments.some((seg) => !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(seg))) {
+    return undefined;
+  }
+  return segments.reduce<unknown>((acc, key) => {
     if (!acc || typeof acc !== "object") return undefined;
     return (acc as Record<string, unknown>)[key];
   }, source);
 }
+
 
 function compareLeaf(fieldValue: unknown, op: string, expected: unknown): boolean {
   switch (op) {
@@ -104,7 +114,7 @@ function matchesCondition(condition: RuleCondition, input: ExtractedFromInput, c
   return compareLeaf(resolveField(condition.field, input, candidate), condition.op, condition.value);
 }
 
-function evaluateEffect(effect: RuleEffect, input: ExtractedFromInput, candidate: CandidateRow): { passed: boolean; reason: string } {
+function evaluateEffect(effect: RuleEffect, input: ExtractedFromInput, candidate: CandidateRow): { passed: boolean; reason: string; deltaScore?: number; isMultiplier?: boolean } {
   switch (effect.type) {
     case "require_prefix": {
       const prefix = stockPrefix(candidate.stock_code);
@@ -134,13 +144,21 @@ function evaluateEffect(effect: RuleEffect, input: ExtractedFromInput, candidate
       else missing = dims.length === 0;
       return { passed: !missing, reason: missing ? `missing ${effect.dimension} dimension` : `${effect.dimension} dimension present` };
     }
+    case "add_score": {
+      return { passed: true, reason: `add score ${effect.value}`, deltaScore: effect.value, isMultiplier: false };
+    }
+    case "multiply_score": {
+      return { passed: true, reason: `multiply score by ${effect.value}`, deltaScore: effect.value, isMultiplier: true };
+    }
     default:
       return { passed: true, reason: "unsupported effect ignored" };
   }
 }
 
 export function evaluateHardRules(input: ExtractedFromInput, candidates: CandidateRow[], rules: MatchingRuleRecord[]): HardRuleEvaluation {
-  if (rules.length === 0) {
+  const hardOnly = rules.filter((r) => r.rule_type === "hard_filter");
+
+  if (hardOnly.length === 0) {
     return {
       candidates,
       candidateRuleHits: new Map(candidates.map((candidate) => [Number(candidate.stock_id), []])),
@@ -148,18 +166,48 @@ export function evaluateHardRules(input: ExtractedFromInput, candidates: Candida
     };
   }
 
-  const passingCandidates: CandidateRow[] = [];
-  const candidateRuleHits = new Map<number, string[]>();
   const audits: RuleAuditEntry[] = [];
+  const candidateRuleHits = new Map<number, string[]>();
+
+  // Input level hard kuralları bir kez değerlendir
+  const inputRules = hardOnly.filter((r) => r.target_level === "input");
+  const pairRules = hardOnly.filter((r) => r.target_level !== "input");
+
+  for (const rule of inputRules) {
+    if (matchesCondition(rule.condition_json, input, {} as CandidateRow)) {
+      const decision = evaluateEffect(rule.effect_json, input, {} as CandidateRow);
+      const label = rule.description?.trim() || `${rule.rule_set_name}#${rule.id}`;
+
+      if (!decision.passed) {
+        audits.push({
+          ruleId: rule.id,
+          candidateStockId: null,
+          decision: "rejected",
+          deltaScore: null,
+          reasonText: `${label}: ${decision.reason} (input_level)`
+        });
+        // Input kuralı başarısızsa tüm adaylar reddolur
+        return { candidates: [], candidateRuleHits, audits };
+      }
+
+      audits.push({
+        ruleId: rule.id,
+        candidateStockId: null,
+        decision: "passed",
+        deltaScore: null,
+        reasonText: `${label}: ${decision.reason} (input_level)`
+      });
+    }
+  }
+
+  const passingCandidates: CandidateRow[] = [];
 
   for (const candidate of candidates) {
     let rejected = false;
     const hits: string[] = [];
 
-    for (const rule of rules) {
-      if (!matchesCondition(rule.condition_json, input, candidate)) {
-        continue;
-      }
+    for (const rule of pairRules) {
+      if (!matchesCondition(rule.condition_json, input, candidate)) continue;
 
       const decision = evaluateEffect(rule.effect_json, input, candidate);
       const label = rule.description?.trim() || `${rule.rule_set_name}#${rule.id}`;
@@ -173,30 +221,74 @@ export function evaluateHardRules(input: ExtractedFromInput, candidates: Candida
           reasonText: `${label}: ${decision.reason}`
         });
         rejected = true;
-        if (rule.stop_on_match || !decision.passed) {
-          break;
-        }
+        if (rule.stop_on_match) break;
+      } else {
+        hits.push(`${label}: ${decision.reason}`);
+        audits.push({
+          ruleId: rule.id,
+          candidateStockId: Number(candidate.stock_id),
+          decision: "passed",
+          deltaScore: null,
+          reasonText: `${label}: ${decision.reason}`
+        });
       }
-
-      hits.push(`${label}: ${decision.reason}`);
-      audits.push({
-        ruleId: rule.id,
-        candidateStockId: Number(candidate.stock_id),
-        decision: "passed",
-        deltaScore: null,
-        reasonText: `${label}: ${decision.reason}`
-      });
     }
 
     candidateRuleHits.set(Number(candidate.stock_id), hits);
-    if (!rejected) {
-      passingCandidates.push(candidate);
+    if (!rejected) passingCandidates.push(candidate);
+  }
+
+  return { candidates: passingCandidates, candidateRuleHits, audits };
+}
+
+export interface SoftBoostResult {
+  stockId: number;
+  totalDelta: number;
+  reasons: string[];
+}
+
+/**
+ * soft_boost kurallarını değerlendirir ve her aday için puan deltası döner.
+ * Adayları elemez; sadece puan etkisini hesaplar.
+ */
+export function evaluateSoftBoosts(
+  input: ExtractedFromInput,
+  candidates: CandidateRow[],
+  rules: MatchingRuleRecord[]
+): Map<number, SoftBoostResult> {
+  const boostRules = rules.filter((r) => r.rule_type === "soft_boost" && r.target_level !== "input");
+  const resultMap = new Map<number, SoftBoostResult>();
+
+  if (boostRules.length === 0) return resultMap;
+
+  for (const candidate of candidates) {
+    const stockId = Number(candidate.stock_id);
+    let totalDelta = 0;
+    const reasons: string[] = [];
+
+    for (const rule of boostRules) {
+      if (!matchesCondition(rule.condition_json, input, candidate)) continue;
+
+      const decision = evaluateEffect(rule.effect_json, input, candidate);
+      const label = rule.description?.trim() || `${rule.rule_set_name}#${rule.id}`;
+
+      if (decision.deltaScore != null) {
+        if (decision.isMultiplier) {
+          // multiply_score: mevcut toplam delta ile çarpılır (ek çarpan olarak uygulanır)
+          totalDelta = totalDelta * Number(decision.deltaScore);
+        } else {
+          totalDelta += Number(decision.deltaScore);
+        }
+        reasons.push(`${label}: ${decision.reason}`);
+      }
+
+      if (rule.stop_on_match) break;
+    }
+
+    if (totalDelta !== 0 || reasons.length > 0) {
+      resultMap.set(stockId, { stockId, totalDelta, reasons });
     }
   }
 
-  return {
-    candidates: passingCandidates,
-    candidateRuleHits,
-    audits
-  };
+  return resultMap;
 }

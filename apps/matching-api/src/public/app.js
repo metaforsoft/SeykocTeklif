@@ -1,4 +1,4 @@
-﻿const el = (id) => document.getElementById(id);
+const el = (id) => document.getElementById(id);
 
 const textWrap = el("textWrap");
 const docWrap = el("docWrap");
@@ -74,6 +74,7 @@ const ruleTestResultEl = el("ruleTestResult");
 let sourceMode = "text";
 let rows = [];
 let extractedDoc = null;
+let cachedSourcePayload = null;
 let allStocks = [];
 let filteredStocks = [];
 let modalRowIndex = null;
@@ -91,15 +92,7 @@ let pendingInstructionSuggestion = null;
 
 function mergeMatchPolicy(nextPolicy) {
   if (!nextPolicy) return;
-  const current = activeMatchPolicy || {};
-  activeMatchPolicy = {
-    ...current,
-    ...nextPolicy,
-    requiredTerms: [...new Set([...(current.requiredTerms || []), ...(nextPolicy.requiredTerms || [])])],
-    requiredStockCodeTerms: [...new Set([...(current.requiredStockCodeTerms || []), ...(nextPolicy.requiredStockCodeTerms || [])])],
-    requiredStockNameTerms: [...new Set([...(current.requiredStockNameTerms || []), ...(nextPolicy.requiredStockNameTerms || [])])],
-    requiredNonEmptyFields: [...new Set([...(current.requiredNonEmptyFields || []), ...(nextPolicy.requiredNonEmptyFields || [])])]
-  };
+  activeMatchPolicy = { ...nextPolicy };
 }
 
 function resetInstructionState() {
@@ -532,6 +525,9 @@ function copyFirstRowValue(field) {
       case "kg":
         row.kg = firstRow.kg ?? null;
         break;
+      case "birimFiyat":
+        row.birimFiyat = firstRow.birimFiyat ?? null;
+        break;
       case "talasMik":
         row.talasMik = firstRow.talasMik ?? null;
         break;
@@ -569,6 +565,7 @@ function copyFirstRowValue(field) {
     mensei: "Menşei",
     quantity: "Adet",
     kg: "Kg",
+    birimFiyat: "Birim Fiyat",
     talasMik: "Talaş Mik.",
     musteriNo: "Müşteri No",
     musteriParcaNo: "Müşteri Parça No",
@@ -1067,20 +1064,37 @@ async function rerunMatchingByInstruction(message, options = {}) {
         ? Boolean(orderTextEl?.value?.trim())
         : Boolean(fileInputEl?.files?.[0]);
       let doc = null;
+      let reextracted = false;
       if (canReextract) {
         doc = await extractDocumentPayload();
         extractedDoc = doc;
         applyLearnedInstructions(doc);
+        reextracted = true;
+      } else if (plan.extractionPrompt && cachedSourcePayload) {
+        setAnalysisModal(true, "Kaynak veri yeni talimatla tekrar çözümleniyor...");
+        doc = await reextractFromCache(plan.extractionPrompt);
+        if (doc) {
+          extractedDoc = doc;
+          applyLearnedInstructions(doc);
+          reextracted = true;
+        }
       } else if (extractedDoc) {
         doc = extractedDoc;
+      } else if (rows.length > 0) {
+        doc = buildDocFromExistingRows();
+        extractedDoc = doc;
       } else {
         throw new Error("Önce metin veya doküman girin.");
       }
-      if (targetIndexes.length > 0 && extractedDoc?.items?.length === rows.length) {
+      const findMatchingItem = (r, itms) => {
+        return itms.find(itm => itm.dim_text === r.dim_text || (r.header_context && itm.header_context === r.header_context));
+      };
+      
+      if (targetIndexes.length > 0 && extractedDoc?.items?.length > 0) {
         const items = extractedDoc.items;
         for (let position = 0; position < targetIndexes.length; position += 1) {
           const rowIndex = targetIndexes[position];
-          const item = items[rowIndex];
+          const item = items[rowIndex] ?? findMatchingItem(rows[rowIndex], items);
           if (!item) continue;
           setAnalysisModal(true, `${position + 1}/${targetIndexes.length} hedef satır yeniden aranıyor...`);
           const filters = item.series ? { series: item.series } : undefined;
@@ -1101,7 +1115,16 @@ async function rerunMatchingByInstruction(message, options = {}) {
             alasim: candidates[0]?.alasim ?? rows[rowIndex].alasim ?? null,
             tamper: candidates[0]?.tamper ?? rows[rowIndex].tamper ?? null
           };
+          if (res.ruleWarning) {
+            appendInstructionMessage("assistant", `⚠️ Uyarı: Hedef satır için ${res.ruleWarning}`);
+          }
         }
+      } else if (!reextracted && !canReextract && rows.length > 0) {
+        await rematchExistingRows({
+          onProgress: ({ current, total }) => {
+            setAnalysisModal(true, `${current}/${total} satır talimata göre yeniden eşleştiriliyor...`);
+          }
+        });
       } else {
         await runAnalysis(doc, {
           onProgress: ({ current, total }) => {
@@ -1256,16 +1279,24 @@ async function fileToBase64(file) {
 async function extractDocumentPayload(options = {}) {
   const userInstruction = currentInstruction();
   if (sourceMode === "text") {
-    return await api("/extract-source", "POST", {
+    const payload = {
       rawText: orderTextEl.value.trim(),
       userInstruction: userInstruction || undefined,
       ...options
-    });
+    };
+    cachedSourcePayload = { type: "text", rawText: payload.rawText };
+    return await api("/extract-source", "POST", payload);
   }
 
   const file = fileInputEl.files?.[0];
   if (!file) throw new Error("Doküman seçin.");
   const contentBase64 = await fileToBase64(file);
+  cachedSourcePayload = {
+    type: "doc",
+    fileName: file.name,
+    mimeType: file.type || "application/octet-stream",
+    contentBase64
+  };
   return await api("/extract-source", "POST", {
     fileName: file.name,
     mimeType: file.type || "application/octet-stream",
@@ -1273,6 +1304,31 @@ async function extractDocumentPayload(options = {}) {
     userInstruction: userInstruction || undefined,
     ...options
   });
+}
+
+async function reextractFromCache(instruction, options = {}) {
+  if (!cachedSourcePayload) return null;
+  if (cachedSourcePayload.type === "text") {
+    return await api("/extract-source", "POST", {
+      rawText: cachedSourcePayload.rawText,
+      userInstruction: instruction || undefined,
+      ...options
+    });
+  }
+  return await api("/extract-source", "POST", {
+    fileName: cachedSourcePayload.fileName,
+    mimeType: cachedSourcePayload.mimeType,
+    contentBase64: cachedSourcePayload.contentBase64,
+    userInstruction: instruction || undefined,
+    ...options
+  });
+}
+
+function selectedFileLooksLikeImage() {
+  const file = fileInputEl.files?.[0];
+  if (!file) return false;
+  if (String(file.type || "").startsWith("image/")) return true;
+  return /\.(png|jpe?g|webp|bmp|gif|tiff?)$/i.test(file.name || "");
 }
 
 function optionLabel(candidate) {
@@ -1396,6 +1452,7 @@ function createEmptyRow(overrides = {}) {
     mensei: "İTHAL",
     quantity: 1,
     kg: null,
+    birimFiyat: null,
     talasMik: null,
     musteriNo: "",
     musteriParcaNo: "",
@@ -1490,6 +1547,21 @@ function syncRowStockAttributes(index, candidate) {
   if (!rows[index]) return;
   rows[index].alasim = candidate?.alasim ?? null;
   rows[index].tamper = candidate?.tamper ?? null;
+}
+
+function ensureResultTableStructure() {
+  const kgHeaderButton = document.querySelector('#resultTable [data-field="kg"]');
+  const kgHeaderCell = kgHeaderButton?.closest("th");
+  const nextHeaderCell = kgHeaderCell?.nextElementSibling;
+  if (kgHeaderCell && (!nextHeaderCell || nextHeaderCell.textContent?.trim() !== "Birim Fiyat")) {
+    const header = document.createElement("th");
+    header.textContent = "Birim Fiyat";
+    kgHeaderCell.insertAdjacentElement("afterend", header);
+  }
+
+  resultBodyEl?.querySelectorAll("td[colspan='18']").forEach((cell) => {
+    cell.setAttribute("colspan", "19");
+  });
 }
 
 function bindOfferLineInputs() {
@@ -1775,6 +1847,14 @@ function bindRowInputs() {
     });
   });
 
+  resultBodyEl.querySelectorAll("[data-k='birim-fiyat']").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const index = Number(e.target.dataset.i);
+      e.target.value = decimalInput(e.target.value || "");
+      rows[index].birimFiyat = toDecimalOrNull(e.target.value);
+    });
+  });
+
   resultBodyEl.querySelectorAll("[data-k='talas-mik']").forEach((input) => {
     input.addEventListener("input", (e) => {
       const index = Number(e.target.dataset.i);
@@ -1799,6 +1879,7 @@ function bindRowInputs() {
 }
 
 function renderTable() {
+  ensureResultTableStructure();
   if (rows.length === 0) {
     resultBodyEl.innerHTML = '<tr><td colspan="18" class="muted center">Sonuç yok.</td></tr>';
     renderOfferLines();
@@ -1817,6 +1898,7 @@ function renderTable() {
     const kesim = row.kesimDurumu || "Kesim Var";
     const mensei = row.mensei || "İTHAL";
     const kg = row.kg ?? null;
+    const birimFiyat = row.birimFiyat ?? null;
     const talasMik = row.talasMik ?? null;
     const musteriNo = row.musteriNo ?? "";
     const musteriParcaNo = row.musteriParcaNo ?? "";
@@ -1888,6 +1970,16 @@ function renderTable() {
         </td>
         <td>
           <input
+            data-k="birim-fiyat"
+            data-i="${index}"
+            class="qty-input"
+            value="${dimensionInput(birimFiyat)}"
+            placeholder="Birim Fiyat"
+            ${matchedOfferLocked ? "disabled" : ""}
+          />
+        </td>
+        <td>
+          <input
             data-k="talas-mik"
             data-i="${index}"
             class="qty-input"
@@ -1932,6 +2024,99 @@ function renderTable() {
   setMatchedOfferLocked(matchedOfferLocked);
 }
 
+function buildDocFromExistingRows() {
+  const items = rows.map((row) => {
+    const dims = [row.dimKalinlik, row.dimEn, row.dimBoy].filter((d) => d !== null && d !== undefined);
+    const dimText = row.dim_text || dims.join("x");
+    const queryParts = [
+      row.header_context || "",
+      dimText,
+      row.series ? `seri ${row.series}` : ""
+    ].filter(Boolean);
+    return {
+      raw: dimText,
+      query: queryParts.join(" ").trim() || dimText,
+      normalized_line: dimText,
+      dim_text: dimText,
+      dim1: row.dimKalinlik ?? null,
+      dim2: row.dimEn ?? null,
+      dim3: row.dimBoy ?? null,
+      qty: row.quantity ?? null,
+      series: row.series ?? null,
+      header_context: row.header_context ?? null,
+      confidence: 0.9
+    };
+  });
+
+  return {
+    source_type: "plain_text",
+    extracted_text: items.map((item) => item.raw).join("\n"),
+    header_context: null,
+    items,
+    parser_confidence: 0.9,
+    extraction_method: "existing_rows",
+    learning: null,
+    debug: null
+  };
+}
+
+async function rematchExistingRows(options = {}) {
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const BATCH_SIZE = 5;
+  let completed = 0;
+
+  for (let batchStart = 0; batchStart < rows.length; batchStart += BATCH_SIZE) {
+    const batchEnd = Math.min(batchStart + BATCH_SIZE, rows.length);
+    const batchIndexes = [];
+    for (let i = batchStart; i < batchEnd; i++) batchIndexes.push(i);
+
+    const promises = batchIndexes.map(async (index) => {
+      const row = rows[index];
+      const dims = [row.dimKalinlik, row.dimEn, row.dimBoy].filter((d) => d !== null && d !== undefined);
+      const dimText = row.dim_text || dims.join("x");
+      const queryParts = [
+        row.header_context || "",
+        dimText,
+        row.series ? `seri ${row.series}` : ""
+      ].filter(Boolean);
+      const queryText = queryParts.join(" ").trim() || dimText;
+
+      if (!queryText) return;
+
+      const filters = row.series ? { series: row.series } : undefined;
+      const res = await api("/match", "POST", {
+        text: queryText,
+        topK: candidateCount(),
+        matchInstruction: currentMatchInstruction() || undefined,
+        matchPolicy: currentMatchPolicy() || undefined,
+        filters
+      });
+
+      const candidates = res.results || [];
+      rows[index] = {
+        ...rows[index],
+        matchHistoryId: Number(res.matchHistoryId),
+        candidates,
+        selected_stock_id: candidates[0]?.stock_id ?? null,
+        selected_score: candidates[0]?.score ?? null,
+        alasim: candidates[0]?.alasim ?? rows[index].alasim ?? null,
+        tamper: candidates[0]?.tamper ?? rows[index].tamper ?? null
+      };
+    });
+
+    await Promise.all(promises);
+    completed += batchIndexes.length;
+    onProgress?.({
+      stage: "matching",
+      current: completed,
+      total: rows.length
+    });
+  }
+
+  renderTable();
+  saveStatusEl.textContent = `${rows.length} satır yeniden eşleştirildi.`;
+}
+
 async function runAnalysis(doc, options = {}) {
   if (!doc) throw new Error("Kaynak çözümlenemedi.");
   if (!Array.isArray(doc.items) || doc.items.length === 0) {
@@ -1957,6 +2142,9 @@ async function runAnalysis(doc, options = {}) {
       matchPolicy: currentMatchPolicy() || undefined,
       filters
     });
+    if (res.ruleWarning) {
+      alert(`Uyarı (Satır ${index + 1}): ${res.ruleWarning}`);
+    }
     const candidates = res.results || [];
     const [defaultKalinlik, defaultEn, defaultBoy] = parseDimParts(item.dim_text);
     rows.push({
@@ -1973,6 +2161,7 @@ async function runAnalysis(doc, options = {}) {
       kesimDurumu: "Kesim Var",
       quantity: item.qty,
       kg: null,
+      birimFiyat: null,
       talasMik: null,
       musteriNo: "",
       musteriParcaNo: "",
@@ -2016,6 +2205,7 @@ function mapRowsForOfferSave() {
     selected_score: row.selected_score ?? null,
     quantity: row.quantity ?? null,
     kg: row.kg ?? null,
+    birimFiyat: row.birimFiyat ?? null,
     talasMik: row.talasMik ?? null,
     musteriNo: row.musteriNo ?? "",
     musteriParcaNo: row.musteriParcaNo ?? "",
@@ -2050,6 +2240,7 @@ function collectMatchedTableExportRows() {
       mensei: row.mensei ?? "İTHAL",
       adet: row.quantity ?? null,
       kg: row.kg ?? null,
+      birimFiyat: row.birimFiyat ?? null,
       talasMik: row.talasMik ?? null,
       musteriNo: row.musteriNo ?? "",
       musteriParcaNo: row.musteriParcaNo ?? ""
@@ -2201,6 +2392,7 @@ async function loadMatchedOffer(recordId) {
       dimEn: row.dimEn ?? null,
       dimBoy: row.dimBoy ?? null,
       kg: row.kg ?? null,
+      birimFiyat: row.birimFiyat ?? null,
       talasMik: row.talasMik ?? null,
       musteriNo: row.musteriNo || "",
       musteriParcaNo: row.musteriParcaNo || "",
@@ -2275,17 +2467,38 @@ dropzoneEl?.addEventListener("drop", async (event) => {
 
 analyzeBtnEl?.addEventListener("click", async () => {
   try {
+    const hasSourceInput = sourceMode === "text"
+      ? Boolean(orderTextEl?.value?.trim())
+      : Boolean(fileInputEl?.files?.[0]);
+    const hasExistingRows = rows.length > 0;
+
+    if (!hasSourceInput && !hasExistingRows) {
+      alert("Lütfen analiz edilecek sipariş metnini girin veya doküman seçin.");
+      return;
+    }
+
+    resetInstructionState();
     pendingChatLearning = null;
-    setAnalysisModal(true, "Doküman okunuyor...");
-    const doc = await extractDocumentPayload();
-    extractedDoc = doc;
-    applyLearnedInstructions(doc);
-    setAnalysisModal(true, `${doc.items?.length || 0} satır eşleştirme kuyruğuna alındı...`);
-    await runAnalysis(doc, {
-      onProgress: ({ current, total }) => {
-        setAnalysisModal(true, `${current}/${total} satır eşleştiriliyor...`);
-      }
-    });
+
+    if (hasSourceInput) {
+      setAnalysisModal(true, "Doküman okunuyor...");
+      const doc = await extractDocumentPayload(selectedFileLooksLikeImage() ? { forceAiFallback: true } : {});
+      extractedDoc = doc;
+      applyLearnedInstructions(doc);
+      setAnalysisModal(true, `${doc.items?.length || 0} satır eşleştirme kuyruğuna alındı...`);
+      await runAnalysis(doc, {
+        onProgress: ({ current, total }) => {
+          setAnalysisModal(true, `${current}/${total} satır eşleştiriliyor...`);
+        }
+      });
+    } else {
+      setAnalysisModal(true, "Mevcut satırlar yeniden eşleştiriliyor...");
+      await rematchExistingRows({
+        onProgress: ({ current, total }) => {
+          setAnalysisModal(true, `${current}/${total} satır yeniden eşleştiriliyor...`);
+        }
+      });
+    }
   } catch (err) {
     alert(err.message);
   } finally {
@@ -2295,7 +2508,30 @@ analyzeBtnEl?.addEventListener("click", async () => {
 
 strongAnalyzeBtnEl?.addEventListener("click", async () => {
   try {
+    const hasSourceInput = sourceMode === "text"
+      ? Boolean(orderTextEl?.value?.trim())
+      : Boolean(fileInputEl?.files?.[0]);
+    const hasExistingRows = rows.length > 0;
+
+    if (!hasSourceInput && !hasExistingRows) {
+      alert("Lütfen analiz edilecek sipariş metnini girin veya doküman seçin.");
+      return;
+    }
+
+    resetInstructionState();
     pendingChatLearning = null;
+
+    if (!hasSourceInput && hasExistingRows) {
+      setAnalysisModal(true, "Mevcut satırlar yeniden eşleştiriliyor...");
+      await rematchExistingRows({
+        onProgress: ({ current, total }) => {
+          setAnalysisModal(true, `${current}/${total} satır yeniden eşleştiriliyor...`);
+        }
+      });
+      setAnalysisModal(false);
+      return;
+    }
+
     setAnalysisModal(true, "Güçlü yapay zeka ile doküman okunuyor...");
     const doc = await extractDocumentPayload({ forceAiFallback: true });
     extractedDoc = doc;
@@ -2650,31 +2886,45 @@ createRuleBtnEl?.addEventListener("click", async () => {
     const ruleSetName = ruleSetNameInputEl?.value?.trim() || "";
     const priority = Number(rulePriorityInputEl?.value ?? 100);
     const description = ruleDescriptionInputEl?.value?.trim() || "";
-    const ruleType = ruleTypeInputEl?.value || "hard_filter";
+    const ruleType = (ruleTypeInputEl?.value?.trim() === "soft_boost") ? "soft_boost" : "hard_filter";
     const conditionJson = parseJsonInput(ruleConditionInputEl?.value, "Condition JSON");
     const effectJson = parseJsonInput(ruleEffectInputEl?.value, "Effect JSON");
+    // 6.2 Scope: ileride scopeTypeInputEl eklendiğinde buradan okunacak
+    const scopeType = "global";
+    const scopeValue = null;
 
     if (!ruleSetName || !description) {
       throw new Error("Rule set adı ve açıklama gerekli.");
+    }
+
+    // 6.3 Çatışma ön kontrolü: soft_boost için eleme efektleri kullanılamaz
+    if (ruleType === "soft_boost") {
+      const hardEffectTypes = ["require_prefix", "require_exact_series", "require_non_null", "reject_prefix", "reject_if_missing_dimension"];
+      if (hardEffectTypes.includes(effectJson?.type)) {
+        throw new Error("soft_boost kural tipi eleme efektleriyle kullanılamaz. add_score veya multiply_score kullanın.");
+      }
     }
 
     const result = await api("/matching-rules", "POST", {
       ruleSetName,
       priority,
       ruleType,
+      scopeType,
+      scopeValue,
       targetLevel: "pair",
       conditionJson,
       effectJson,
-      stopOnMatch: true,
+      stopOnMatch: ruleType === "hard_filter", // soft_boost için stop_on_match anlamsız
       description,
       active: true
     });
     await loadMatchingRules();
-    saveStatusEl.textContent = `Kural eklendi. Rule Set #${result.ruleSetId}, Rule #${result.ruleId}`;
+    saveStatusEl.textContent = `Kural eklendi. Rule Set #${result.ruleSetId}, Rule #${result.ruleId} (${ruleType})`;
   } catch (err) {
     alert(err.message);
   }
 });
+
 
 runRuleTestBtnEl?.addEventListener("click", async () => {
   try {

@@ -1,7 +1,10 @@
-﻿import { createHash } from "node:crypto";
+import { createHash } from "node:crypto";
 import { InstructionPolicyPayload, MatchPolicy, RowInstructionCommand, RowInstructionSet } from "@smp/common";
 import { matchPool } from "@smp/db";
 import { ExtractionFingerprint } from "./extraction-learning";
+
+const openAiApiKey = process.env["OPENAI_API_KEY"]?.trim() ?? "";
+const openAiModel = process.env["OPENAI_STRUCTURED_MODEL"]?.trim() || "gpt-4.1-mini";
 
 export interface ParsedInstructionPlan {
   rawMessage: string;
@@ -31,7 +34,7 @@ function normalizeText(value: string): string {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/ı/g, "i")
-    .replace(/Ã„Â±/g, "i")
+    
     .trim();
 }
 
@@ -57,10 +60,11 @@ function extractInstructionSet(text: string): RowInstructionSet {
     set.kesimDurumu = kesimYokIndex > kesimVarIndex ? "Kesim Yok" : "Kesim Var";
   }
 
-  if (normalized.includes("yerli")) {
-    set.mensei = "YERLİ";
-  } else if (normalized.includes("ithal")) {
-    set.mensei = "İTHAL";
+  const mentionsMensei = normalized.includes("menşei") || normalized.includes("mensei");
+  const hasContext = normalized.includes("satirlar") || normalized.includes("tum") || normalized.includes("hepsi");
+  if (mentionsMensei || hasContext) {
+    if (normalized.includes("yerli")) set.mensei = "YERLİ";
+    else if (normalized.includes("ithal")) set.mensei = "İTHAL";
   }
 
   const adetMatch = normalized.match(/adet\s*(?:=|:)?\s*(\d+)/i) || normalized.match(/(\d+)\s*adet/i);
@@ -83,7 +87,7 @@ function parseRowCommands(message: string, rowCount: number): {
     return { commands: [], ignored: [] };
   }
 
-  const rowRefPattern = /(\d+)\.\s*sat[Ä±i]r(?:Ä±|i|a|e|da|de|daki|deki|icin|iÃ§in)?/g;
+  const rowRefPattern = /(\d+)\.\s*sat[ıi]r(?:ı|i|a|e|da|de|daki|deki|icin|için)?/g;
   const rowRefs = [...normalized.matchAll(rowRefPattern)];
   const commands: RowInstructionCommand[] = [];
   const ignored: Array<{ reason: string; rowNumber?: number }> = [];
@@ -144,13 +148,13 @@ export function parseMatchPolicy(instruction: string | undefined | null): MatchP
     /\b([1-9]\d{3})\s+serisinde\b/,
     /\b([1-9]\d{3})\s+serisinde\s+(?:ara|getir|goster)\b/,
     /\b([1-9]\d{3})\s+serisine\b/,
-    /\b([1-9]\d{3})\s+serisine\s+(?:bak|gore|gÃ¶re)\b/,
-    /\b(?:alasim|alaÅŸim)\s+([1-9]\d{3})\b/,
-    /\b([1-9]\d{3})\s+(?:lerde|larda|olanlar|olanlari|olanlarÄ±)\b/,
+    /\b([1-9]\d{3})\s+serisine\s+(?:bak|gore|göre)\b/,
+    /\b(?:alasim|alaşim)\s+([1-9]\d{3})\b/,
+    /\b([1-9]\d{3})\s+(?:lerde|larda|olanlar|olanlari|olanları)\b/,
     /\bsadece\s+([1-9]\d{3})\s+stoklarda\b/,
     /\b([1-9]\d{3})\s+(?:stoklarda|stoklarda ara|lerde ara|larda ara)\b/,
-    /\b([1-9]\d{3})\s+(?:icin|iÃ§in)\s+ara\b/,
-    /\b([1-9]\d{3})\s+(?:getir|ara|goster|gÃ¶ster)\b/
+    /\b([1-9]\d{3})\s+(?:icin|için)\s+ara\b/,
+    /\b([1-9]\d{3})\s+(?:getir|ara|goster|göster)\b/
   ];
   const seriesMatch = seriesPatterns.map((pattern) => normalized.match(pattern)).find(Boolean) ?? null;
   const temperPatterns = [
@@ -160,10 +164,10 @@ export function parseMatchPolicy(instruction: string | undefined | null): MatchP
     /\btemper\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i,
     /\btemperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i,
     /\b(t\d{1,4}|h\d{1,4}|o|f)\s+tamper\b/i,
-    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+(?:olanlar|olanlari|olanlarÄ±|getir|ara)\b/i
+    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+(?:olanlar|olanlari|olanları|getir|ara)\b/i
   ];
   const temperMatch = temperPatterns.map((pattern) => normalized.match(pattern)).find(Boolean) ?? null;
-  const dim1Match = normalized.match(/\b(?:kalinlik|kalÄ±nlÄ±k)\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
+  const dim1Match = normalized.match(/\b(?:kalinlik|kalınlık)\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
   const dim2Match = normalized.match(/\ben\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
   const dim3Match = normalized.match(/\bboy\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
   const stockCodeContainsMatch = normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin|olsun)(?:lerde|larda)?\b/i)
@@ -177,12 +181,12 @@ export function parseMatchPolicy(instruction: string | undefined | null): MatchP
     { pattern: /\bprofil\b/, value: "PROFIL" },
     { pattern: /\blama\b/, value: "LAMA" },
     { pattern: /\bsac\b/, value: "SAC" },
-    { pattern: /\bkosebent\b|\bkÃ¶ÅŸebent\b/, value: "KOSEBENT" },
+    { pattern: /\bkosebent\b|\bköşebent\b/, value: "KOSEBENT" },
     { pattern: /\bmil\b/, value: "MIL" },
     { pattern: /\bplaka\b/, value: "PLAKA" }
   ];
   const preferredProductType = productTypePatterns.find((item) => item.pattern.test(normalized))?.value ?? null;
-  const quotedTerms = [...normalized.matchAll(/["Ã¢â‚¬Å“Ã¢â‚¬Â']([^"Ã¢â‚¬Å“Ã¢â‚¬Â']{2,40})["Ã¢â‚¬Å“Ã¢â‚¬Â']/g)].map((match) => match[1].trim());
+  const quotedTerms = [...normalized.matchAll(/["”“']([^"”“']{2,40})["”“']/g)].map((match) => match[1].trim());
   const genericTerms = [...normalized.matchAll(/\b([a-z0-9._-]{2,20})\s+gecen stok/g)].map((match) => match[1].trim());
   const requiredTerms = [...new Set([...quotedTerms, ...genericTerms].filter(Boolean))];
   const requiredStockCodeTerms = (stockCodeContainsMatch?.[1] || stockCodeActionMatch?.[1])
@@ -193,10 +197,10 @@ export function parseMatchPolicy(instruction: string | undefined | null): MatchP
     : [];
   const requiredNonEmptyFields = [
     /\btamper\s+bos\s+olamaz\b/i.test(normalized) || /\btemper\s+bos\s+olamaz\b/i.test(normalized) ? "temper" : null,
-    /\balasim\s+bos\s+olamaz\b/i.test(normalized) || /\balaÅŸim\s+bos\s+olamaz\b/i.test(normalized) ? "alasim" : null,
+    /\balasim\s+bos\s+olamaz\b/i.test(normalized) || /\balaşim\s+bos\s+olamaz\b/i.test(normalized) ? "alasim" : null,
     /\bstok\s*kodu\s+bos\s+olamaz\b/i.test(normalized) ? "stock_code" : null,
-    /\bstok\s*adi\s+bos\s+olamaz\b/i.test(normalized) || /\bstok\s*adÄ±\s+bos\s+olamaz\b/i.test(normalized) ? "stock_name" : null,
-    /\bkalinlik\s+bos\s+olamaz\b/i.test(normalized) || /\bkalÄ±nlÄ±k\s+bos\s+olamaz\b/i.test(normalized) ? "dim1" : null,
+    /\bstok\s*adi\s+bos\s+olamaz\b/i.test(normalized) || /\bstok\s*adı\s+bos\s+olamaz\b/i.test(normalized) ? "stock_name" : null,
+    /\bkalinlik\s+bos\s+olamaz\b/i.test(normalized) || /\bkalınlık\s+bos\s+olamaz\b/i.test(normalized) ? "dim1" : null,
     /\ben\s+bos\s+olamaz\b/i.test(normalized) ? "dim2" : null,
     /\bboy\s+bos\s+olamaz\b/i.test(normalized) ? "dim3" : null
   ].filter((value): value is string => Boolean(value));
@@ -233,24 +237,238 @@ export function parseMatchPolicy(instruction: string | undefined | null): MatchP
 }
 
 function parseExpectedItemCount(message: string): number | null {
-  const match = message.match(/(\d{1,2})\s*(?:satir|satÄ±r|olcu|Ã¶lÃ§Ã¼|kalem)/i);
+  const match = message.match(/(\d{1,2})\s*(?:satir|satır|olcu|ölçü|kalem)/i);
   if (!match) return null;
   const count = Number(match[1]);
   return Number.isFinite(count) && count > 0 ? count : null;
 }
 
-export function planInstructionMessage(args: {
+interface LlmInstructionResult {
+  intent: "match_filter" | "extraction_hint" | "row_update" | "rerun" | "unknown";
+  matchPolicy: MatchPolicy | null;
+  extractionPrompt: string | null;
+  rowCommands: RowInstructionCommand[];
+  needsRematch: boolean;
+  needsReextract: boolean;
+  explanation: string;
+}
+
+async function parseInstructionWithLlm(message: string, rowCount: number): Promise<LlmInstructionResult | null> {
+  if (!openAiApiKey) return null;
+  if (!message.trim()) return null;
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openAiApiKey}`
+      },
+      body: JSON.stringify({
+        model: openAiModel,
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Sen bir alüminyum/metal stok eşleştirme platformunun talimat çözümleyicisisin.",
+              "Kullanıcı Türkçe doğal dilde çeşitli talimatlar verir. Talimatı analiz edip doğru JSON çıktısını döndür.",
+              "",
+              "## Talimat Türleri ve intent Değerleri",
+              "",
+              "### 1. match_filter — Stok arama/filtreleme talimatları",
+              "Kullanıcı eşleştirme sonuçlarını filtrelemek veya belirli stoklarda aramak istiyor.",
+              "matchPolicy alanlarını doldur:",
+              "- stockCodePrefix: Stok kodu belirli önekle başlasın (örn: 'APL', 'ACB')",
+              "- requiredTerms: Stok kodu veya adında geçmesi gereken terimler (büyük harf)",
+              "- requiredStockCodeTerms: Sadece stok kodunda geçmesi gereken terimler (büyük harf)",
+              "- requiredStockNameTerms: Sadece stok adında geçmesi gereken terimler",
+              "- preferredSeries: Alaşım serisi (4 haneli, örn: '5083', '6061')",
+              "- preferredTemper: Tamper/temper durumu (örn: 'H321', 'T6', 'HO', 'O', 'F')",
+              "- preferredProductType: Ürün tipi (PLAKA, BORU, PROFIL, LAMA, SAC, MIL, KOSEBENT, CUBUK)",
+              "- preferredDim1: Kalınlık/çap (mm)",
+              "- preferredDim2: En (mm)",
+              "- preferredDim3: Boy (mm)",
+              "needsRematch: true",
+              "",
+              "Örnekler:",
+              "- 'apl olan stoklarda ara' → intent: match_filter, requiredStockCodeTerms: ['APL']",
+              "- 'plaka stoklarda ara' → intent: match_filter, preferredProductType: 'PLAKA'",
+              "- 'apl ile başlayan stoklarda ara' → intent: match_filter, stockCodePrefix: 'APL'",
+              "",
+              "### 2. extraction_hint — Belge/doküman çözümleme talimatları",
+              "Excel kolon adları, alanların nasıl parse edileceği, veri çıkarma ipuçları.",
+              "extractionPrompt alanına kullanıcının talimatını aynen yaz.",
+              "needsReextract: true, needsRematch: true",
+              "",
+              "Örnekler:",
+              "- 'exceldeki miktar alanı mik.' → intent: extraction_hint, extractionPrompt: 'exceldeki miktar alanı mik.'",
+              "- 'kalınlık kolonu X Yönü' → intent: extraction_hint, extractionPrompt: 'kalınlık kolonu X Yönü'",
+              "- '3 satır sipariş var' → intent: extraction_hint, extractionPrompt: '3 satır sipariş var'",
+              "- 'boy alanı uzunluk kolonu' → intent: extraction_hint, extractionPrompt: 'boy alanı uzunluk kolonu'",
+              "",
+              "### 3. row_update — Satır düzenleme talimatları",
+              "Belirli satırlar veya tüm satırlar için kesim durumu, menşei, adet gibi özellik değişiklikleri.",
+              "rowCommands dizisine komutları ekle.",
+              "scope: 'all' (tüm satırlar) veya 'row' (belirli satır, rowIndex: 0-based, rowNumber: 1-based)",
+              "set içinde: kesimDurumu ('Kesim Var' veya 'Kesim Yok'), mensei ('YERLİ' veya 'İTHAL'), quantity (sayı)",
+              "needsRematch: false, needsReextract: false",
+              "",
+              "Örnekler:",
+              "- 'tüm satırlar kesim yok' → intent: row_update, rowCommands: [{scope:'all', set:{kesimDurumu:'Kesim Yok'}}]",
+              "- '3. satır kesim yok' → intent: row_update, rowCommands: [{scope:'row', rowIndex:2, rowNumber:3, set:{kesimDurumu:'Kesim Yok'}}]",
+              "- 'hepsi ithal' → intent: row_update, rowCommands: [{scope:'all', set:{mensei:'İTHAL'}}]",
+              "- '5. satır 10 adet' → intent: row_update, rowCommands: [{scope:'row', rowIndex:4, rowNumber:5, set:{quantity:10}}]",
+              "",
+              "### 4. rerun — Yeniden analiz/eşleştirme talimatları",
+              "Kullanıcı mevcut verileri yeniden analiz etmek veya eşleştirmek istiyor.",
+              "needsRematch: true",
+              "",
+              "Örnekler:",
+              "- 'yeniden eşleştir' → intent: rerun",
+              "- 'tekrar ara' → intent: rerun",
+              "",
+              "### 5. unknown — Anlaşılamayan talimatlar",
+              "Talimat yukarıdaki kategorilere uymuyorsa intent: 'unknown' döndür.",
+              "",
+              "## Genel Kurallar",
+              "- Sadece talimattan çıkarılabilen alanları doldur.",
+              "- Boş/null kalması gereken alanları null veya boş dizi bırak.",
+              "- explanation alanına talimatın nasıl anlaşıldığını Türkçe kısaca yaz.",
+              `- Tabloda şu an ${rowCount} satır var. Satır numaraları 1'den başlar.`
+            ].join("\n")
+          },
+          {
+            role: "user",
+            content: message
+          }
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "instruction_plan",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                intent: {
+                  type: "string",
+                  enum: ["match_filter", "extraction_hint", "row_update", "rerun", "unknown"]
+                },
+                explanation: { type: "string" },
+                needsRematch: { type: "boolean" },
+                needsReextract: { type: "boolean" },
+                extractionPrompt: { type: ["string", "null"] },
+                matchPolicy: {
+                  type: ["object", "null"],
+                  additionalProperties: false,
+                  properties: {
+                    stockCodePrefix: { type: ["string", "null"] },
+                    requiredTerms: { type: "array", items: { type: "string" } },
+                    requiredStockCodeTerms: { type: "array", items: { type: "string" } },
+                    requiredStockNameTerms: { type: "array", items: { type: "string" } },
+                    preferredSeries: { type: ["string", "null"] },
+                    preferredTemper: { type: ["string", "null"] },
+                    preferredProductType: { type: ["string", "null"] },
+                    preferredDim1: { type: ["number", "null"] },
+                    preferredDim2: { type: ["number", "null"] },
+                    preferredDim3: { type: ["number", "null"] }
+                  },
+                  required: [
+                    "stockCodePrefix", "requiredTerms", "requiredStockCodeTerms",
+                    "requiredStockNameTerms", "preferredSeries", "preferredTemper",
+                    "preferredProductType", "preferredDim1", "preferredDim2", "preferredDim3"
+                  ]
+                },
+                rowCommands: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      scope: { type: "string", enum: ["all", "row"] },
+                      rowIndex: { type: ["integer", "null"] },
+                      rowNumber: { type: ["integer", "null"] },
+                      set: {
+                        type: "object",
+                        additionalProperties: false,
+                        properties: {
+                          kesimDurumu: { type: ["string", "null"], enum: ["Kesim Var", "Kesim Yok", null] },
+                          mensei: { type: ["string", "null"], enum: ["YERLİ", "İTHAL", null] },
+                          quantity: { type: ["number", "null"] }
+                        },
+                        required: ["kesimDurumu", "mensei", "quantity"]
+                      }
+                    },
+                    required: ["scope", "rowIndex", "rowNumber", "set"]
+                  }
+                }
+              },
+              required: ["intent", "explanation", "needsRematch", "needsReextract", "extractionPrompt", "matchPolicy", "rowCommands"]
+            }
+          }
+        }
+      })
+    });
+
+    if (!response.ok) return null;
+
+    const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content) as LlmInstructionResult;
+    if (parsed.intent === "unknown") return null;
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export async function planInstructionMessage(args: {
   message: string;
   rowCount: number;
   sourceMode: string;
-}): ParsedInstructionPlan {
+}): Promise<ParsedInstructionPlan> {
   const sanitizedMessage = String(args.message ?? "").trim();
   const { commands, ignored } = parseRowCommands(sanitizedMessage, args.rowCount);
-  const matchPolicy = parseMatchPolicy(sanitizedMessage);
+  let matchPolicy = parseMatchPolicy(sanitizedMessage);
   const expectedItemCount = parseExpectedItemCount(sanitizedMessage);
-  const rowDefaults = commands.find((command) => command.scope === "all")?.set ?? null;
+  let rowDefaults = commands.find((command) => command.scope === "all")?.set ?? null;
 
-  const extractionPrompt = expectedItemCount ? sanitizedMessage : null;
+  let extractionPrompt = expectedItemCount ? sanitizedMessage : null;
+
+  // LLM fallback: regex hiçbir intent bulamadıysa AI'a sor
+  const hasAnyRegexIntent = Boolean(matchPolicy) || Boolean(extractionPrompt) || commands.length > 0;
+  if (!hasAnyRegexIntent) {
+    const llmResult = await parseInstructionWithLlm(sanitizedMessage, args.rowCount);
+    if (llmResult) {
+      if (llmResult.matchPolicy) {
+        matchPolicy = llmResult.matchPolicy;
+      }
+      if (llmResult.extractionPrompt) {
+        extractionPrompt = llmResult.extractionPrompt;
+      }
+      if (llmResult.rowCommands && llmResult.rowCommands.length > 0) {
+        for (const cmd of llmResult.rowCommands) {
+          const cleanSet: RowInstructionSet = {};
+          if (cmd.set.kesimDurumu) cleanSet.kesimDurumu = cmd.set.kesimDurumu as "Kesim Var" | "Kesim Yok";
+          if (cmd.set.mensei) cleanSet.mensei = cmd.set.mensei as "YERLİ" | "İTHAL";
+          if (cmd.set.quantity != null) cleanSet.quantity = cmd.set.quantity;
+          if (Object.keys(cleanSet).length > 0) {
+            commands.push({
+              scope: cmd.scope as "all" | "row",
+              ...(cmd.scope === "row" ? { rowIndex: cmd.rowIndex ?? 0, rowNumber: cmd.rowNumber ?? 1 } : {}),
+              set: cleanSet
+            });
+          }
+        }
+        rowDefaults = commands.find((c) => c.scope === "all")?.set ?? rowDefaults;
+      }
+    }
+  }
 
   const needsRematch = Boolean(matchPolicy) || Boolean(extractionPrompt);
   const needsReextract = Boolean(extractionPrompt) && args.sourceMode !== "text";

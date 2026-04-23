@@ -56,7 +56,7 @@ Ornekler:
 
 - kalinlik 0 ile 8 arasinda ise stok kodu `ALV` ile baslamali
 - urun tipi `BORU` ise `erp_cap` dolu olmali
-- seri `7075` ise alaÅŸim alani `7075` veya ayni seri grubundan olmali degil, tam `7075` olmali
+- seri `7075` ise alaşim alani `7075` veya ayni seri grubundan olmali degil, tam `7075` olmali
 - temper istenmisse aday temper bilgisi bos olamaz
 
 ### 5.2 Soft Preferences

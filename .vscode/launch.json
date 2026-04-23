@@ -3,21 +3,47 @@
   "configurations": [
     {
       "name": "Debug Matching API",
-      "type": "node",
+      "type": "pwa-node",
       "request": "launch",
       "cwd": "${workspaceFolder}",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "debug:api"],
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--inspect=9229", "-r", "ts-node/register"],
+      "args": ["apps/matching-api/src/index.ts"],
+      "env": {
+        "MATCH_PG_HOST": "localhost",
+        "MATCH_PG_PORT": "5433",
+        "API_PORT": "8081"
+      },
       "console": "integratedTerminal",
       "skipFiles": ["<node_internals>/**"]
     },
     {
       "name": "Debug Sync Service",
-      "type": "node",
+      "type": "pwa-node",
       "request": "launch",
       "cwd": "${workspaceFolder}",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "debug:sync"],
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--inspect=9230", "-r", "ts-node/register"],
+      "args": ["apps/sync-service/src/index.ts"],
+      "env": {
+        "MATCH_PG_HOST": "localhost",
+        "MATCH_PG_PORT": "5433"
+      },
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Debug Order Dispatcher",
+      "type": "pwa-node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--inspect=9231", "-r", "ts-node/register"],
+      "args": ["apps/order-dispatcher/src/index.ts"],
+      "env": {
+        "MATCH_PG_HOST": "localhost",
+        "MATCH_PG_PORT": "5433"
+      },
       "console": "integratedTerminal",
       "skipFiles": ["<node_internals>/**"]
     }
@@ -25,7 +51,7 @@
   "compounds": [
     {
       "name": "Debug All Services",
-      "configurations": ["Debug Matching API", "Debug Sync Service"]
+      "configurations": ["Debug Matching API", "Debug Sync Service", "Debug Order Dispatcher"]
     }
   ]
 }

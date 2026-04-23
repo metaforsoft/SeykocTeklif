@@ -1,4 +1,4 @@
-﻿import path from "node:path";
+import path from "node:path";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import * as XLSX from "xlsx";
@@ -9,7 +9,7 @@ import { rerankResults } from "./rerank";
 import { extractSourceDocument } from "./source-extract";
 import { recordExtractionFeedback, saveExtractionProfile } from "./extraction-learning";
 import { commitInstructionPolicy, parseMatchPolicy, planInstructionMessage } from "./instruction-policies";
-import { evaluateHardRules, MatchingRuleRecord, RuleCondition, RuleEffect } from "./rule-engine";
+import { evaluateHardRules, evaluateSoftBoosts, MatchingRuleRecord, RuleCondition, RuleEffect } from "./rule-engine";
 import { authenticateCredentials, createSession, destroySession, ensureDefaultAdminUser, hashPassword, resolveRequestUser, shouldRedirectToLogin, isPublicPath } from "./auth";
 import { getLookupOptions, postUyumRequest } from "./uyum-lookups";
 
@@ -60,6 +60,7 @@ interface MatchedOfferLineInput {
   selected_score?: number | null;
   quantity?: number | null;
   kg?: number | null;
+  birimFiyat?: number | null;
   talasMik?: number | null;
   musteriNo?: string | null;
   musteriParcaNo?: string | null;
@@ -116,6 +117,7 @@ interface ExportMatchedTableRowInput {
   en?: number | null;
   boy?: number | null;
   kg?: number | null;
+  birimFiyat?: number | null;
   talasMik?: number | null;
   musteriNo?: string | null;
   musteriParcaNo?: string | null;
@@ -134,7 +136,10 @@ interface InsertOfferDetailPayload {
   DcardCode: string;
   ItemAttributeCode1?: string;
   unitId: number;
+  /** Miktar (kg) */
   qty: number;
+  /** Adet */
+  QtyFreePrm?: number;
   unitPriceTra: number;
   unitPrice: number;
   vatId: number;
@@ -144,6 +149,9 @@ interface InsertOfferDetailPayload {
   amtTra: number;
   lineNo: number;
   curTraId: number;
+  /** Kur oranı (satır) */
+  CurRateTra: number;
+  dynamicFields?: Record<string, string | number | null>;
 }
 
 interface InsertOfferPayload {
@@ -162,6 +170,12 @@ interface InsertOfferPayload {
     curId: number;
     coId: number;
     branchId: number;
+    /** Belge numarası tipi ID */
+    DocNumberDId: number;
+    /** Belge numarası */
+    DocNo: string;
+    /** Kur oranı (master) */
+    CurRateTra: number;
   };
 }
 
@@ -169,15 +183,6 @@ interface InsertOfferPayloadLowercase {
   value: InsertOfferPayload["Value"];
 }
 
-function normalizeGuidanceText(value: string): string {
-  return value
-    .toLocaleLowerCase("tr-TR")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/ı/g, "i")
-    .replace(/Ä±/g, "i")
-    .trim();
-}
 
 function formatErpDateTime(value: string | null | undefined): string | null {
   const raw = String(value ?? "").trim();
@@ -197,99 +202,24 @@ function formatOfferDateForUyum(value: string | null | undefined): string | null
   return `${month}.${day}.${year}`;
 }
 
-function parseMatchGuidance(instruction: string | undefined): MatchGuidance {
-  const normalized = normalizeGuidanceText(instruction ?? "");
-  if (!normalized) {
-    return {
-      stockCodePrefix: null,
-      requiredTerms: [],
-      requiredStockCodeTerms: [],
-      requiredStockNameTerms: [],
-      requiredNonEmptyFields: [],
-      preferredSeries: null,
-      preferredTemper: null,
-      preferredProductType: null,
-      preferredDim1: null,
-      preferredDim2: null,
-      preferredDim3: null
-    };
-  }
-
-  const prefixMatch = normalized.match(/\b([a-z0-9._-]{2,12})\s+ile baslayan(?:\s+stok(?:lar|lari|larda)?)?(?:\s+(?:ara|getir|goster|esle|eşle))?\b/)
-    || normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,12})\s+ile baslayan(?:larda|lar|lari)?(?:\s+(?:ara|getir|goster|esle|eşle))?\b/i);
-  const seriesMatch = [
-    /\b([1-9]\d{3})\s+gecen stok\b/,
-    /\b([1-9]\d{3})\s+serisinde\b/,
-    /\b([1-9]\d{3})\s+serisinde\s+(?:ara|getir|goster)\b/,
-    /\b([1-9]\d{3})\s+serisine\b/,
-    /\b([1-9]\d{3})\s+serisine\s+(?:bak|gore|gÃ¶re)\b/,
-    /\b([1-9]\d{3})\s+(?:getir|ara|goster)\b/
-  ].map((pattern) => normalized.match(pattern)).find(Boolean) ?? null;
-  const temperMatch = [
-    /\btamper\s*(?:=|:)?\s*(t\d{1,4}|h\d{1,4}|o|f)\b/i,
-    /\btamperi?\s*(?:=|:)?\s*(t\d{1,4}|h\d{1,4}|o|f)\b/i,
-    /\btemper\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i,
-    /\btemperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\b/i,
-    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+tamper\b/i,
-    /\b(t\d{1,4}|h\d{1,4}|o|f)\s+(?:olanlar|getir|ara)\b/i
-  ].map((pattern) => normalized.match(pattern)).find(Boolean) ?? null;
-  const dim1Match = normalized.match(/\b(?:kalinlik|kalÄ±nlÄ±k)\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
-  const dim2Match = normalized.match(/\ben\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
-  const dim3Match = normalized.match(/\bboy\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\b/i);
-  const stockCodeContainsMatch = normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin|olsun)(?:lerde|larda)?\b/i)
-    || normalized.match(/\b([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin)(?:lerde|larda)?\s+stok\s*kod(?:u|unda)?\b/i);
-  const stockNameContainsMatch = normalized.match(/\bstok\s*ad(?:i|ı|inda|ında)?\s+(.+?)\s+(?:gecen|geçen|gecsin|geçsin|olsun)(?:lerde|larda)?\b/i)
-    || normalized.match(/\b(.+?)\s+(?:gecen|geçen|gecsin|geçsin)(?:lerde|larda)?\s+stok\s*ad(?:i|ı|inda|ında)?\b/i);
-  const stockCodeActionMatch = normalized.match(/\bstok\s*kod(?:u|unda)?\s+([a-z0-9._-]{2,30})\s+(?:gecsin|geçsin|olsun)\b/i);
-  const stockNameActionMatch = normalized.match(/\bstok\s*ad(?:i|ı|inda|ında)?\s+(.+?)\s+(?:gecsin|geçsin|olsun)\b/i);
-  const quotedTerms = [...normalized.matchAll(/["â€œâ€']([^"â€œâ€']{2,40})["â€œâ€']/g)].map((match) => match[1].trim());
-  const genericTerms = [...normalized.matchAll(/\b([a-z0-9._-]{2,20})\s+gecen stok/g)].map((match) => match[1].trim());
-  const requiredTerms = [...new Set([...quotedTerms, ...genericTerms].filter(Boolean))];
-  const requiredStockCodeTerms = (stockCodeContainsMatch?.[1] || stockCodeActionMatch?.[1])
-    ? [String(stockCodeContainsMatch?.[1] || stockCodeActionMatch?.[1]).trim().toUpperCase()]
-    : [];
-  const requiredStockNameTerms = (stockNameContainsMatch?.[1] || stockNameActionMatch?.[1])
-    ? String(stockNameContainsMatch?.[1] || stockNameActionMatch?.[1]).trim().split(/\s+/).filter((term) => term.length >= 2)
-    : [];
-  const requiredNonEmptyFields = [
-    /\btamper\s+bos\s+olamaz\b/i.test(normalized) || /\btemper\s+bos\s+olamaz\b/i.test(normalized) ? "temper" : null,
-    /\balasim\s+bos\s+olamaz\b/i.test(normalized) || /\balaÅŸim\s+bos\s+olamaz\b/i.test(normalized) ? "alasim" : null,
-    /\bstok\s*kodu\s+bos\s+olamaz\b/i.test(normalized) ? "stock_code" : null,
-    /\bstok\s*adi\s+bos\s+olamaz\b/i.test(normalized) || /\bstok\s*adÄ±\s+bos\s+olamaz\b/i.test(normalized) ? "stock_name" : null,
-    /\bkalinlik\s+bos\s+olamaz\b/i.test(normalized) || /\bkalÄ±nlÄ±k\s+bos\s+olamaz\b/i.test(normalized) ? "dim1" : null,
-    /\ben\s+bos\s+olamaz\b/i.test(normalized) ? "dim2" : null,
-    /\bboy\s+bos\s+olamaz\b/i.test(normalized) ? "dim3" : null
-  ].filter((value): value is string => Boolean(value));
-
-  return {
-    stockCodePrefix: prefixMatch?.[1]?.toUpperCase() ?? null,
-    requiredTerms,
-    requiredStockCodeTerms,
-    requiredStockNameTerms,
-    requiredNonEmptyFields,
-    preferredSeries: seriesMatch?.[1] ?? null,
-    preferredTemper: temperMatch?.[1]?.toUpperCase() ?? null,
-    preferredProductType: null,
-    preferredDim1: dim1Match ? Number(dim1Match[1].replace(',', '.')) : null,
-    preferredDim2: dim2Match ? Number(dim2Match[1].replace(',', '.')) : null,
-    preferredDim3: dim3Match ? Number(dim3Match[1].replace(',', '.')) : null
-  };
-}
-
+/**
+ * Hem matchInstruction string'ini hem de kalıcı matchPolicy nesnesini birleştirir.
+ * Parsing için canonical kaynak olarak parseMatchPolicy (instruction-policies.ts) kullanılır.
+ */
 function buildGuidance(instruction: string | undefined, policy: MatchPolicy | null | undefined): MatchGuidance {
-  const parsed = parseMatchGuidance(instruction);
+  const parsed = parseMatchPolicy(instruction ?? "");
   return {
-    stockCodePrefix: policy?.stockCodePrefix ?? parsed.stockCodePrefix ?? null,
-    requiredTerms: [...new Set([...(policy?.requiredTerms ?? []), ...(parsed.requiredTerms ?? [])])],
-    requiredStockCodeTerms: [...new Set([...(policy?.requiredStockCodeTerms ?? []), ...(parsed.requiredStockCodeTerms ?? [])])],
-    requiredStockNameTerms: [...new Set([...(policy?.requiredStockNameTerms ?? []), ...(parsed.requiredStockNameTerms ?? [])])],
-    requiredNonEmptyFields: [...new Set([...(policy?.requiredNonEmptyFields ?? []), ...(parsed.requiredNonEmptyFields ?? [])])],
-    preferredSeries: policy?.preferredSeries ?? parsed.preferredSeries ?? null,
-    preferredTemper: policy?.preferredTemper ?? parsed.preferredTemper ?? null,
-    preferredProductType: policy?.preferredProductType ?? parsed.preferredProductType ?? null,
-    preferredDim1: policy?.preferredDim1 ?? parsed.preferredDim1 ?? null,
-    preferredDim2: policy?.preferredDim2 ?? parsed.preferredDim2 ?? null,
-    preferredDim3: policy?.preferredDim3 ?? parsed.preferredDim3 ?? null
+    stockCodePrefix: policy?.stockCodePrefix ?? parsed?.stockCodePrefix ?? null,
+    requiredTerms: [...new Set([...(policy?.requiredTerms ?? []), ...(parsed?.requiredTerms ?? [])])],
+    requiredStockCodeTerms: [...new Set([...(policy?.requiredStockCodeTerms ?? []), ...(parsed?.requiredStockCodeTerms ?? [])])],
+    requiredStockNameTerms: [...new Set([...(policy?.requiredStockNameTerms ?? []), ...(parsed?.requiredStockNameTerms ?? [])])],
+    requiredNonEmptyFields: [...new Set([...(policy?.requiredNonEmptyFields ?? []), ...(parsed?.requiredNonEmptyFields ?? [])])],
+    preferredSeries: policy?.preferredSeries ?? parsed?.preferredSeries ?? null,
+    preferredTemper: policy?.preferredTemper ?? parsed?.preferredTemper ?? null,
+    preferredProductType: policy?.preferredProductType ?? parsed?.preferredProductType ?? null,
+    preferredDim1: policy?.preferredDim1 ?? parsed?.preferredDim1 ?? null,
+    preferredDim2: policy?.preferredDim2 ?? parsed?.preferredDim2 ?? null,
+    preferredDim3: policy?.preferredDim3 ?? parsed?.preferredDim3 ?? null
   };
 }
 
@@ -311,7 +241,7 @@ async function buildLearningBoostMap(extracted: {
   for (const row of res.rows) {
     const count = Number(row.hit_count);
     if (!Number.isFinite(count) || count <= 0) continue;
-    const boost = Math.min(24, Math.log1p(count) * 8);
+    const boost = Math.min(10, Math.log1p(count) * 6);
     map.set(Number(row.stock_id), Number(boost.toFixed(3)));
   }
   return map;
@@ -392,45 +322,9 @@ function applyGuidanceFilters(candidates: CandidateRow[], guidance: MatchGuidanc
       }
     }
 
-    if (guidance.preferredSeries && candidate.series && candidate.series !== guidance.preferredSeries) {
-      return false;
-    }
-
-    if (guidance.preferredTemper) {
-      const temper = (candidate.temper ?? candidate.tamper ?? "").toLocaleUpperCase("tr-TR");
-      if (temper && temper !== guidance.preferredTemper) {
-        return false;
-      }
-    }
-
-    if (guidance.preferredProductType) {
-      const productType = (candidate.product_type ?? candidate.cinsi ?? "").toLocaleUpperCase("tr-TR");
-      if (productType && productType !== guidance.preferredProductType) {
-        return false;
-      }
-    }
-
-    if (guidance.preferredDim1 != null) {
-      const dim1 = Number(candidate.dim1 ?? candidate.erp_cap);
-      if (Number.isFinite(dim1) && Math.abs(dim1 - Number(guidance.preferredDim1)) > 0.001) {
-        return false;
-      }
-    }
-
-    if (guidance.preferredDim2 != null) {
-      const dim2 = Number(candidate.dim2 ?? candidate.erp_en);
-      if (Number.isFinite(dim2) && Math.abs(dim2 - Number(guidance.preferredDim2)) > 0.001) {
-        return false;
-      }
-    }
-
-    if (guidance.preferredDim3 != null) {
-      const dim3 = Number(candidate.dim3 ?? candidate.erp_boy);
-      if (Number.isFinite(dim3) && Math.abs(dim3 - Number(guidance.preferredDim3)) > 0.001) {
-        return false;
-      }
-    }
-
+    // Not: preferredSeries, preferredTemper, preferredProductType ve preferredDim1/2/3
+    // burada bir eleme (hard filter) yapmayacak. Bunlar applyGuidanceBoost fonksiyonunda
+    // eslesen adaylara puan verecek (soft preference)
     return true;
   });
 }
@@ -580,12 +474,21 @@ function applyGuidanceBoost(results: ScoredResult[], candidates: CandidateRow[],
   }).sort((a, b) => b.score - a.score);
 }
 
-async function loadActiveHardRules(): Promise<MatchingRuleRecord[]> {
+let _activeHardRulesCache: { rules: MatchingRuleRecord[]; loadedAt: number } | null = null;
+const RULE_CACHE_TTL_MS = 30000;
+
+export function invalidateRuleCache() {
+  _activeHardRulesCache = null;
+}
+
+async function _loadActiveRulesFromDb(): Promise<MatchingRuleRecord[]> {
   const res = await matchPool.query<{
     id: string;
     rule_set_id: string;
     rule_set_name: string;
     priority: string;
+    scope_type: string;
+    scope_value: string | null;
     rule_type: "hard_filter" | "soft_boost";
     target_level: "input" | "candidate" | "pair";
     condition_json: RuleCondition;
@@ -598,6 +501,8 @@ async function loadActiveHardRules(): Promise<MatchingRuleRecord[]> {
        mr.rule_set_id::text,
        mrs.name AS rule_set_name,
        mrs.priority::text,
+       mrs.scope_type,
+       mrs.scope_value,
        mr.rule_type,
        mr.target_level,
        mr.condition_json,
@@ -608,7 +513,6 @@ async function loadActiveHardRules(): Promise<MatchingRuleRecord[]> {
      JOIN matching_rule_sets mrs ON mrs.id = mr.rule_set_id
      WHERE mr.active = TRUE
        AND mrs.active = TRUE
-       AND mr.rule_type = 'hard_filter'
      ORDER BY mrs.priority ASC, mr.id ASC`
   );
 
@@ -617,13 +521,24 @@ async function loadActiveHardRules(): Promise<MatchingRuleRecord[]> {
     rule_set_id: Number(row.rule_set_id),
     rule_set_name: row.rule_set_name,
     priority: Number(row.priority),
+    scope_type: row.scope_type,
+    scope_value: row.scope_value,
     rule_type: row.rule_type,
     target_level: row.target_level,
     condition_json: row.condition_json,
     effect_json: row.effect_json,
     stop_on_match: row.stop_on_match,
     description: row.description
-  }));
+  } as MatchingRuleRecord)); // Cast safe for now, will update RuleRecord
+}
+
+async function loadActiveRules(): Promise<MatchingRuleRecord[]> {
+  if (_activeHardRulesCache && Date.now() - _activeHardRulesCache.loadedAt < RULE_CACHE_TTL_MS) {
+    return _activeHardRulesCache.rules;
+  }
+  const rules = await _loadActiveRulesFromDb();
+  _activeHardRulesCache = { rules, loadedAt: Date.now() };
+  return rules;
 }
 
 async function loadAllRules(): Promise<Array<MatchingRuleRecord & { active: boolean }>> {
@@ -632,6 +547,8 @@ async function loadAllRules(): Promise<Array<MatchingRuleRecord & { active: bool
     rule_set_id: string;
     rule_set_name: string;
     priority: string;
+    scope_type: string | null;
+    scope_value: string | null;
     rule_type: "hard_filter" | "soft_boost";
     target_level: "input" | "candidate" | "pair";
     condition_json: RuleCondition;
@@ -645,6 +562,8 @@ async function loadAllRules(): Promise<Array<MatchingRuleRecord & { active: bool
        mr.rule_set_id::text,
        mrs.name AS rule_set_name,
        mrs.priority::text,
+       mrs.scope_type,
+       mrs.scope_value,
        mr.rule_type,
        mr.target_level,
        mr.condition_json,
@@ -662,6 +581,8 @@ async function loadAllRules(): Promise<Array<MatchingRuleRecord & { active: bool
     rule_set_id: Number(row.rule_set_id),
     rule_set_name: row.rule_set_name,
     priority: Number(row.priority),
+    scope_type: row.scope_type ?? null,
+    scope_value: row.scope_value ?? null,
     rule_type: row.rule_type,
     target_level: row.target_level,
     condition_json: row.condition_json,
@@ -671,6 +592,7 @@ async function loadAllRules(): Promise<Array<MatchingRuleRecord & { active: bool
     active: row.active
   }));
 }
+
 
 async function loadInstructionPolicies(): Promise<Array<{
   id: number;
@@ -875,29 +797,43 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
 
   const details = rows.map((row, index) => {
     const stockId = normalizePositiveInteger(row.selected_stock_id) as number;
-    const quantity = normalizePositiveInteger(row.quantity) as number;
+    // Miktar (kg) — ERP qty alanı
+    const miktar = toSafeNumber(row.kg) ?? 0;
+    // Adet (parça sayısı) — ERP QtyFreePrm alanı
+    const adet = normalizePositiveInteger(row.quantity) ?? 0;
+    // Birim fiyat
+    const birimFiyat = toSafeNumber(row.birimFiyat) ?? 0;
     const stockCode = stockCodeMap.get(stockId);
-    const mensei = String(row.mensei ?? "").trim().toLocaleUpperCase("tr-TR") || "Ä°THAL";
+    const mensei = String(row.mensei ?? "").trim().toLocaleUpperCase("tr-TR") || "İTHAL";
     if (!stockCode) {
       throw new Error(`Satir ${index + 1}: ERP stok kodu bulunamadi`);
     }
 
-    const amount = quantity;
+    const amount = Number((miktar * birimFiyat).toFixed(4));
     return {
       lineType: "S",
       DcardCode: stockCode,
       ItemAttributeCode1: mensei,
       unitId: 165,
-      qty: quantity,
-      unitPriceTra: 1,
-      unitPrice: 1,
+      qty: miktar,
+      QtyFreePrm: adet > 0 ? adet : undefined,
+      unitPriceTra: birimFiyat,
+      unitPrice: birimFiyat,
       vatId: 424,
       vatStatus: "Hariç",
       whouseId: 3681,
       amt: amount,
       amtTra: 0,
       lineNo: (index + 1) * 10,
-      curTraId: 114
+      curTraId: 114,
+      CurRateTra: 1,
+      dynamicFields: {
+        ZZ_HEIGHT: toSafeNumber(row.dimBoy),
+        ZZ_WIDTH: toSafeNumber(row.dimEn),
+        ZZ_Thickness: toSafeNumber(row.dimKalinlik),
+        ZZ_CUSTOMER_PART: String(row.musteriParcaNo ?? "").trim() || null,
+        ZZ_CUSTOMER_NO: String(row.musteriNo ?? "").trim() || null
+      }
     };
   });
 
@@ -916,7 +852,10 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
       curTra: 2220,
       curId: 114,
       coId: 2715,
-      branchId: 6749
+      branchId: 6749,
+      DocNumberDId: 1635,
+      DocNo: "0",
+      CurRateTra: 1
     }
   };
 }
@@ -1065,9 +1004,9 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
       await client.query(
         `INSERT INTO matched_offer_lines(
            matched_offer_id, line_no, match_history_id, selected_stock_id, stock_code, stock_name, birim,
-           quantity, kg, talas_mik, musteri_no, musteri_parca_no,
+           quantity, kg, birim_fiyat, talas_mik, musteri_no, musteri_parca_no,
            dim_kalinlik, dim_en, dim_boy, kesim_durumu, selected_score, is_manual, source_line_text, line_json
-         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb)`,
+         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
         [
           offerId,
           index + 1,
@@ -1078,6 +1017,7 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           birim,
           toSafeNumber(row.quantity),
           toSafeNumber(row.kg),
+          toSafeNumber(row.birimFiyat),
           toSafeNumber(row.talasMik),
           String(row.musteriNo ?? "").trim() || null,
           String(row.musteriParcaNo ?? "").trim() || null,
@@ -1399,6 +1339,7 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
     birim: string | null;
     quantity: string | null;
     kg: string | null;
+    birim_fiyat: string | null;
     talas_mik: string | null;
     musteri_no: string | null;
     musteri_parca_no: string | null;
@@ -1412,7 +1353,7 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
     is_manual: boolean;
   }>(
     `SELECT line_no, match_history_id::text, selected_stock_id, stock_code, stock_name, birim,
-            quantity::text, kg::text, talas_mik::text, musteri_no, musteri_parca_no,
+            quantity::text, kg::text, birim_fiyat::text, talas_mik::text, musteri_no, musteri_parca_no,
             dim_kalinlik::text, dim_en::text, dim_boy::text,
             NULLIF(line_json->>'alasim', '') AS alasim,
             NULLIF(line_json->>'tamper', '') AS tamper,
@@ -1451,6 +1392,7 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
       selected_score: row.selected_stock_id && row.selected_stock_id > 0 ? toSafeNumber(row.selected_score) : null,
       quantity: toSafeNumber(row.quantity),
       kg: toSafeNumber(row.kg),
+      birimFiyat: toSafeNumber(row.birim_fiyat),
       talasMik: toSafeNumber(row.talas_mik),
       musteriNo: row.musteri_no,
       musteriParcaNo: row.musteri_parca_no,
@@ -1547,20 +1489,25 @@ app.post<{ Body: SendMatchedOfferToErpBody }>("/matched-offers/send-erp", async 
 app.post<{ Body: { rows?: ExportMatchedTableRowInput[] } }>("/exports/matched-table", async (request, reply) => {
   const rows = Array.isArray(request.body?.rows) ? request.body.rows : [];
   if (rows.length === 0) {
-    return reply.code(400).send({ error: "AktarÄ±lacak satÄ±r bulunamadÄ±" });
+    return reply.code(400).send({ error: "Aktarılacak satır bulunamadı" });
   }
 
   const exportRows = rows.map((row, index) => ({
-    "SÄ±ra": Number.isFinite(Number(row.sira)) ? Number(row.sira) : index + 1,
-    "KalÄ±nlÄ±k": row.kalinlik ?? "",
+    "Sıra": Number.isFinite(Number(row.sira)) ? Number(row.sira) : index + 1,
+    "Kalınlık": row.kalinlik ?? "",
     "En": row.en ?? "",
     "Boy": row.boy ?? "",
     "Stok Kodu": String(row.stokKodu ?? "").trim(),
-    "Stok AdÄ±": String(row.stokAdi ?? "").trim(),
+    "Stok Adı": String(row.stokAdi ?? "").trim(),
     "Birim": String(row.birim ?? "").trim(),
     "Kesim Durumu": String(row.kesimDurumu ?? "").trim(),
-    "MenÅŸei": String(row.mensei ?? "").trim(),
-    "Adet": row.adet ?? ""
+    "Menşei": String(row.mensei ?? "").trim(),
+    "Adet": row.adet ?? "",
+    "Kg": row.kg ?? "",
+    "Birim Fiyat": row.birimFiyat ?? "",
+    "TalaÅŸ Mik.": row.talasMik ?? "",
+    "MÃ¼ÅŸteri No": String(row.musteriNo ?? "").trim(),
+    "MÃ¼ÅŸteri ParÃ§a No": String(row.musteriParcaNo ?? "").trim()
   }));
 
   const workbook = XLSX.utils.book_new();
@@ -1575,7 +1522,12 @@ app.post<{ Body: { rows?: ExportMatchedTableRowInput[] } }>("/exports/matched-ta
     { wch: 10 },
     { wch: 16 },
     { wch: 12 },
-    { wch: 10 }
+    { wch: 10 },
+    { wch: 10 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 20 }
   ];
   XLSX.utils.book_append_sheet(workbook, worksheet, "Eslestirilen Satirlar");
 
@@ -1648,8 +1600,31 @@ app.get("/instruction-policies", async () => {
   return { items };
 });
 
+function validateRuleCondition(cond: any): boolean {
+  if (!cond || typeof cond !== "object") return false;
+  if (Array.isArray(cond.all)) return cond.all.every(validateRuleCondition);
+  if (Array.isArray(cond.any)) return cond.any.every(validateRuleCondition);
+  if (cond.not) return validateRuleCondition(cond.not);
+  const ops = ["=", "!=", ">", ">=", "<", "<=", "starts_with", "contains", "exists", "between", "in", "not_in"];
+  if (typeof cond.field === "string" && typeof cond.op === "string" && ops.includes(cond.op)) {
+    return true;
+  }
+  return false;
+}
+
+function validateRuleEffect(effect: any): boolean {
+  if (!effect || typeof effect !== "object") return false;
+  const hardTypes = ["require_prefix", "require_exact_series", "require_non_null", "reject_prefix", "reject_if_missing_dimension"];
+  const softTypes = ["add_score", "multiply_score"];
+  if (typeof effect.type !== "string") return false;
+  if (hardTypes.includes(effect.type)) return true;
+  if (softTypes.includes(effect.type) && (typeof effect.value === "number" || typeof effect.value === "string")) return true;
+  return false;
+}
+
 app.post<{
   Body: {
+    ruleSetId?: number;
     ruleSetName?: string;
     scopeType?: string;
     scopeValue?: string | null;
@@ -1664,6 +1639,9 @@ app.post<{
     createdBy?: string | null;
   };
 }>("/matching-rules", async (request, reply) => {
+  let ruleSetId = Number(request.body?.ruleSetId);
+  const hasValidRuleSetId = Number.isFinite(ruleSetId) && ruleSetId > 0;
+  
   const ruleSetName = String(request.body?.ruleSetName ?? (request.body as { rule_set_name?: string } | undefined)?.rule_set_name ?? "").trim();
   const scopeType = String(request.body?.scopeType ?? (request.body as { scope_type?: string } | undefined)?.scope_type ?? "global").trim() || "global";
   const scopeValue = String(request.body?.scopeValue ?? (request.body as { scope_value?: string | null } | undefined)?.scope_value ?? "").trim() || null;
@@ -1677,20 +1655,48 @@ app.post<{
   const description = String(request.body?.description ?? "").trim() || null;
   const createdBy = String(request.body?.createdBy ?? "").trim() || null;
 
-  if (!ruleSetName || !conditionJson || !effectJson) {
-    return reply.code(400).send({ error: "ruleSetName, conditionJson ve effectJson gerekli" });
+  if (!conditionJson || !effectJson) {
+    return reply.code(400).send({ error: "conditionJson ve effectJson gerekli" });
+  }
+  
+  if (!hasValidRuleSetId && !ruleSetName) {
+    return reply.code(400).send({ error: "ruleSetName veya mevcut bir ruleSetId gerekli" });
+  }
+
+  if (!validateRuleCondition(conditionJson)) {
+    return reply.code(400).send({ error: "Gecersiz conditionJson formati" });
+  }
+  if (!validateRuleEffect(effectJson)) {
+    return reply.code(400).send({ error: "Gecersiz effectJson formati" });
+  }
+
+  // 6.3 Çatışma kontrolü: soft_boost hard_filter ile aynı target'a çelişmemeli
+  if (ruleType === "soft_boost") {
+    const eType = (effectJson as any)?.type;
+    if (["require_prefix", "require_exact_series", "require_non_null", "reject_prefix", "reject_if_missing_dimension"].includes(eType)) {
+      return reply.code(400).send({ error: "soft_boost kural tipi eleme efektleriyle kullanılamaz; add_score veya multiply_score kullanın" });
+    }
   }
 
   const client = await matchPool.connect();
   try {
     await client.query("BEGIN");
-    const ruleSetInsert = await client.query<{ id: string }>(
-      `INSERT INTO matching_rule_sets(name, scope_type, scope_value, priority, active, created_by)
-       VALUES($1,$2,$3,$4,$5,$6)
-       RETURNING id::text`,
-      [ruleSetName, scopeType, scopeValue, priority, active, createdBy]
-    );
-    const ruleSetId = Number(ruleSetInsert.rows[0].id);
+    
+    if (hasValidRuleSetId) {
+      const existingSet = await client.query("SELECT id FROM matching_rule_sets WHERE id = $1", [ruleSetId]);
+      if (existingSet.rowCount === 0) {
+        throw new Error("Belirtilen ruleSetId bulunamadi");
+      }
+    } else {
+      const ruleSetInsert = await client.query<{ id: string }>(
+        `INSERT INTO matching_rule_sets(name, scope_type, scope_value, priority, active, created_by)
+         VALUES($1,$2,$3,$4,$5,$6)
+         RETURNING id::text`,
+        [ruleSetName, scopeType, scopeValue, priority, active, createdBy]
+      );
+      ruleSetId = Number(ruleSetInsert.rows[0].id);
+    }
+    
     const ruleInsert = await client.query<{ id: string }>(
       `INSERT INTO matching_rules(
          rule_set_id, rule_type, target_level, condition_json, effect_json, stop_on_match, active, description
@@ -1698,7 +1704,13 @@ app.post<{
        RETURNING id::text`,
       [ruleSetId, ruleType, targetLevel, JSON.stringify(conditionJson), JSON.stringify(effectJson), stopOnMatch, active, description]
     );
+    // 6.4 Versiyonlama: kural eklenince set versiyonu artar
+    await client.query(
+      `UPDATE matching_rule_sets SET version = COALESCE(version, 0) + 1, updated_at = NOW() WHERE id = $1`,
+      [ruleSetId]
+    );
     await client.query("COMMIT");
+    invalidateRuleCache();
     return { ok: true, ruleSetId, ruleId: Number(ruleInsert.rows[0].id) };
   } catch (error) {
     await client.query("ROLLBACK");
@@ -1750,13 +1762,17 @@ app.put<{
   } | undefined;
 
   if (body?.conditionJson || body?.condition_json) {
+    const c = body.conditionJson ?? body.condition_json;
+    if (!validateRuleCondition(c)) return reply.code(400).send({ error: "Gecersiz conditionJson formati" });
     updates.push(`condition_json = $${idx}::jsonb`);
-    params.push(JSON.stringify(body.conditionJson ?? body.condition_json));
+    params.push(JSON.stringify(c));
     idx += 1;
   }
   if (body?.effectJson || body?.effect_json) {
+    const e = body.effectJson ?? body.effect_json;
+    if (!validateRuleEffect(e)) return reply.code(400).send({ error: "Gecersiz effectJson formati" });
     updates.push(`effect_json = $${idx}::jsonb`);
-    params.push(JSON.stringify(body.effectJson ?? body.effect_json));
+    params.push(JSON.stringify(e));
     idx += 1;
   }
   if (typeof body?.stopOnMatch === "boolean" || typeof body?.stop_on_match === "boolean") {
@@ -1792,6 +1808,13 @@ app.put<{
     );
   }
 
+  // 6.4 Versiyonlama: kural güncellenince set versiyonu artar
+  await matchPool.query(
+    `UPDATE matching_rule_sets SET version = COALESCE(version, 0) + 1, updated_at = NOW() WHERE id = $1`,
+    [Number(existing.rows[0].rule_set_id)]
+  );
+
+  invalidateRuleCache();
   return { ok: true };
 });
 
@@ -1866,7 +1889,7 @@ app.post<{
     return { ok: true, extracted, beforeCount: 0, afterCount: 0, audits: [], items: [] };
   }
 
-  const activeRules = await loadActiveHardRules();
+  const activeRules = await loadActiveRules();
   const rules = ruleIds.length > 0 ? activeRules.filter((rule) => ruleIds.includes(rule.id)) : activeRules;
   const evaluation = evaluateHardRules(extracted, candidates, rules);
 
@@ -2018,7 +2041,7 @@ app.post<{
 
   return {
     ok: true,
-    plan: planInstructionMessage({
+    plan: await planInstructionMessage({
       message,
       rowCount: Math.max(0, Number(request.body?.rowCount ?? 0)),
       sourceMode: request.body?.sourceMode?.trim() || "text"
@@ -2092,7 +2115,7 @@ app.post<{
 app.post<{
   Body: {
     rawMessage: string;
-    plan: ReturnType<typeof planInstructionMessage>;
+    plan: Awaited<ReturnType<typeof planInstructionMessage>>;
     extractedDoc: ParsedOrderDocument;
     approved?: boolean;
     sourceName?: string;
@@ -2261,8 +2284,15 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     series: extracted.series,
     dim_text: extracted.dim_text
   });
-  const hardRules = await loadActiveHardRules();
-  ruleSummary.loadedRuleCount = hardRules.length;
+  const hardRules = await loadActiveRules();
+  // 6.2 Scope filtresi: scope_type=global veya scope_type belirtilmemişse tüm isteklere uygulanır
+  const scopedRules = hardRules.filter((r) => {
+    if (!r.scope_type || r.scope_type === "global") return true;
+    // Scope bazlı kurallar şimdilik yalnızca global'e fallback yapar
+    // (customer/source scope genişletme için buraya koşul eklenecek)
+    return false;
+  });
+  ruleSummary.loadedRuleCount = scopedRules.length;
 
   for (const stage of searchStages) {
     if (stage.name !== "strict" && stage.whereSql === searchStages[0].whereSql && stage.limit === searchStages[0].limit) {
@@ -2283,7 +2313,7 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
       continue;
     }
 
-    const hardRuleEval = evaluateHardRules(extracted, guidedCandidates, hardRules);
+    const hardRuleEval = evaluateHardRules(extracted, guidedCandidates, scopedRules);
     if (hardRuleEval.candidates.length === 0) {
       ruleSummary.rejectedCandidateCount += guidedCandidates.length;
       pendingRuleAudits.push(...hardRuleEval.audits.map((audit) => ({
@@ -2296,11 +2326,37 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
       continue;
     }
 
-    const rawScored = baseScoreCandidates(extracted, hardRuleEval.candidates, hardRuleEval.candidates.length || topK).map((item) => ({
-      ...item,
-      rule_hits: hardRuleEval.candidateRuleHits.get(Number(item.stock_id)) ?? item.rule_hits ?? [],
-      hard_rule_pass: true
-    }));
+    // 6.1 Soft boost: eleme yapmaz, sadece puan etkisi uygular
+    const softBoostMap = evaluateSoftBoosts(extracted, hardRuleEval.candidates, scopedRules);
+
+    const rawScored = baseScoreCandidates(extracted, hardRuleEval.candidates, hardRuleEval.candidates.length || topK).map((item) => {
+      const stockId = Number(item.stock_id);
+      const boost = softBoostMap.get(stockId);
+      if (!boost || boost.totalDelta === 0) {
+        return {
+          ...item,
+          rule_hits: hardRuleEval.candidateRuleHits.get(stockId) ?? item.rule_hits ?? [],
+          hard_rule_pass: true
+        };
+      }
+      const newScore = Number((item.score + boost.totalDelta).toFixed(3));
+      return {
+        ...item,
+        score: newScore,
+        why: [...item.why, ...boost.reasons],
+        rule_hits: [...(hardRuleEval.candidateRuleHits.get(stockId) ?? item.rule_hits ?? []), ...boost.reasons],
+        hard_rule_pass: true,
+        score_breakdown: item.score_breakdown
+          ? {
+            ...item.score_breakdown,
+            components: {
+              ...item.score_breakdown.components,
+              instruction: item.score_breakdown.components.instruction + boost.totalDelta
+            }
+          }
+          : item.score_breakdown
+      };
+    });
     const guidedScored = applyGuidanceBoost(rawScored, hardRuleEval.candidates, guidance);
     const boosted = applyLearningBoost(guidedScored, learningBoostMap, guidedScored.length || topK);
     results = await rerankResults(text, boosted, topK);
@@ -2329,13 +2385,18 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
   const matchHistoryId = Number(historyRes.rows[0].id);
 
   if (pendingRuleAudits.length > 0) {
-    for (const audit of pendingRuleAudits) {
-      await matchPool.query(
-        `INSERT INTO matching_rule_audit(match_history_id, rule_id, candidate_stock_id, decision, delta_score, reason_text)
-         VALUES($1,$2,$3,$4,$5,$6)`,
-        [matchHistoryId, audit.ruleId, audit.candidateStockId, audit.decision, audit.deltaScore, audit.reasonText]
-      );
-    }
+    await matchPool.query(
+      `INSERT INTO matching_rule_audit(match_history_id, rule_id, candidate_stock_id, decision, delta_score, reason_text)
+       SELECT $1, unnest($2::bigint[]), unnest($3::int[]), unnest($4::text[]), unnest($5::numeric[]), unnest($6::text[])`,
+      [
+        matchHistoryId,
+        pendingRuleAudits.map(a => a.ruleId),
+        pendingRuleAudits.map(a => a.candidateStockId),
+        pendingRuleAudits.map(a => a.decision),
+        pendingRuleAudits.map(a => a.deltaScore),
+        pendingRuleAudits.map(a => a.reasonText)
+      ]
+    );
   }
 
   for (let index = 0; index < results.length; index += 1) {
@@ -2358,12 +2419,18 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     );
   }
 
-  return {
+  const matchResponse: any = {
     matchHistoryId,
     extracted,
     searchStage: usedStage,
     results
   };
+
+  if (results.length === 0 && ruleSummary.rejectedCandidateCount > 0) {
+    matchResponse.ruleWarning = `Kurallar ${ruleSummary.rejectedCandidateCount} adayın tamamını eledi. Kuralları kontrol edin.`;
+  }
+  
+  return matchResponse;
 });
 
 app.post<{ Body: { matchHistoryId: number; selected_stock_id: number; user_note?: string } }>("/feedback", async (request, reply) => {

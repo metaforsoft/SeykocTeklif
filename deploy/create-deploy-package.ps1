@@ -68,6 +68,7 @@ $paths = @(
   "services/ocr-service/app.py",
   "services/ocr-service/requirements.txt",
   "deploy/nginx/default.conf",
+  "deploy/reset-app-users.sql",
   "deploy/.env.server.example",
   "deploy/.env.local.server.example",
   "deploy/publish-package.ps1",

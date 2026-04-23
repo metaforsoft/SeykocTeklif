@@ -24,12 +24,12 @@ function optional(name: string, defaultValue: string): string {
 
 export const env = {
   erp: {
-    host: required("ERP_PG_HOST"),
-    port: Number(required("ERP_PG_PORT")),
-    database: required("ERP_PG_DB"),
-    user: required("ERP_PG_USER"),
-    password: required("ERP_PG_PASSWORD"),
-    stockView: required("ERP_STOCK_VIEW"),
+    host: optional("ERP_PG_HOST", ""),
+    port: Number(optional("ERP_PG_PORT", "5432")),
+    database: optional("ERP_PG_DB", ""),
+    user: optional("ERP_PG_USER", ""),
+    password: optional("ERP_PG_PASSWORD", ""),
+    stockView: optional("ERP_STOCK_VIEW", ""),
     columns: {
       stockId: optional("ERP_COL_STOCK_ID", "stock_id"),
       stockCode: optional("ERP_COL_STOCK_CODE", "stock_code"),

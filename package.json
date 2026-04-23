@@ -13,6 +13,9 @@
     "migrate": "npm run -w @smp/db migrate",
     "debug:api": "set MATCH_PG_HOST=localhost&& set MATCH_PG_PORT=5433&& set API_PORT=8081&& npm run -w @smp/matching-api debug",
     "debug:sync": "set MATCH_PG_HOST=localhost&& set MATCH_PG_PORT=5433&& npm run -w @smp/sync-service debug",
-    "debug:dispatch": "set MATCH_PG_HOST=localhost&& set MATCH_PG_PORT=5433&& npm run -w @smp/order-dispatcher debug"
+    "debug:dispatch": "set MATCH_PG_HOST=localhost&& set MATCH_PG_PORT=5433&& npm run -w @smp/order-dispatcher debug",
+    "debug:remote:api": "npm run -w @smp/matching-api debug",
+    "debug:remote:sync": "npm run -w @smp/sync-service debug",
+    "debug:remote:dispatch": "npm run -w @smp/order-dispatcher debug"
   }
 }

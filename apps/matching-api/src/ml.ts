@@ -40,7 +40,7 @@ function parseTrigramWhy(why: string[]): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function toFeatureVector(r: ScoredResult): number[] {
+function toFeatureVectorLegacy(r: ScoredResult): number[] {
   const why = new Set(r.why);
   return [
     1,
@@ -57,6 +57,30 @@ function toFeatureVector(r: ScoredResult): number[] {
     why.has("upper thickness close") ? 1 : 0,
     why.has("thickness below requested") || why.has("dimension below requested") ? 1 : 0,
     parseTrigramWhy(r.why)
+  ];
+}
+
+function toFeatureVector(r: ScoredResult): number[] {
+  const bd = r.score_breakdown?.components;
+  if (!bd) {
+    // Fallback: eski yöntem (geriye uyumluluk)
+    return toFeatureVectorLegacy(r);
+  }
+  return [
+    1,                                    // bias
+    r.score,                              // toplam skor
+    bd.series > 30 ? 1 : 0,              // series exact (40 puan)
+    bd.series > 0 && bd.series <= 30 ? 1 : 0, // series group (20 puan)
+    bd.temper > 0 ? 1 : 0,               // temper match
+    bd.product_type > 0 ? 1 : 0,         // product type match
+    bd.dimensions > 20 ? 1 : 0,          // dimensions exact
+    Math.max(0, bd.dimensions) / 25,     // nearest upper dimension analog
+    bd.dimensions > 0 && bd.dimensions <= 15 ? 1 : 0, // upper dimension close
+    bd.thickness > 15 ? 1 : 0,           // thickness exact
+    Math.max(0, bd.thickness) / 20,      // thickness analog
+    bd.thickness > 0 && bd.thickness <= 10 ? 1 : 0,  // upper thickness close
+    bd.learning / 10,                    // learning boost (normalized)
+    parseTrigramWhy(r.why)               // keep original parsing for trigrams as it's not explicit in breakdown yet
   ];
 }
 

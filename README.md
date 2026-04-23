@@ -319,11 +319,23 @@ Sunucuda ozet kurulum:
 ```powershell
 git clone <repo-url> C:\stock-matching-platform
 cd C:\stock-matching-platform
-Copy-Item deploy\.env.server.example .env
-Copy-Item deploy\.env.local.server.example .env.local
-notepad .env
-notepad .env.local
 powershell -ExecutionPolicy Bypass -File .\deploy\publish-server.ps1
+```
+
+Script ilk calistirmada `.env` ve `.env.local` dosyalarini orneklerden olusturur ve durur. ERP baglanti bilgileri ayni kalacaksa genelde sadece `MATCH_PG_*` alanlarini degistirmeniz yeterlidir. Sonra ayni komutu tekrar calistirin.
+
+Varsayilan davranis:
+
+- mevcut containerlari kapatir
+- PostgreSQL volume'unu siler
+- sifirdan veritabani olusturur
+- migrationlari uygular
+- uygulamada sadece `admin` kullanicisini birakir
+
+Bu ilk kurulum ve tam reset icindir. Veritabani korunacak normal guncelleme icin:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\publish-server.ps1 -ResetDatabase:$false -EnforceAdminOnly:$false
 ```
 
 Manuel komut:
@@ -344,6 +356,7 @@ Erisim:
 
 - API: `http://SUNUCU_IP/`
 - UI: `http://SUNUCU_IP/ui/`
+- ilk giris: `admin / admin`
 
 ## Deploy Paketi
 
@@ -372,12 +385,10 @@ Bu paket sunlari icerir:
 Sunucuda ZIP'i acip paket klasoru icinde su komutlari calistirin:
 
 ```powershell
-Copy-Item .\deploy\.env.server.example .\.env
-Copy-Item .\deploy\.env.local.server.example .\.env.local
-notepad .env
-notepad .env.local
 powershell -ExecutionPolicy Bypass -File .\deploy\publish-package.ps1
 ```
+
+Bu script de varsayilan olarak volume'u sifirlar, migration calistirir ve sadece `admin` kullanicisini birakir. ERP degerleri ayni ise paket icinde de genelde sadece `MATCH_PG_*` alanlarini guncellemeniz yeterlidir.
 
 ## Debug
 
