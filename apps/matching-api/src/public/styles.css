@@ -583,7 +583,12 @@ tbody tr:nth-child(even) { background: #fbfdff; }
 .score { font-weight: 700; color: var(--ok); }
 
 .stock-code-cell { min-width: 250px; }
-.stock-name-cell { min-width: 320px; }
+.stock-name-cell,
+.stock-name-cell div {
+  min-width: 320px;
+  user-select: text;
+  cursor: text;
+}
 .candidate-meta {
   margin-top: 6px;
   display: grid;

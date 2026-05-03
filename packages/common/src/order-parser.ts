@@ -15,10 +15,10 @@ function splitLines(raw: string): string[] {
 
 function normalizeForParsing(line: string): string {
   return line
-    .replace(/[aƒÆ’a¢â‚¬â€aƒâ€”a—]/g, "x")
+    .replace(/[\u00D7\u2715\u2716\u2A2F]/g, "x")
     .replace(/[*]/g, "x")
     .replace(/[><]/g, " ")
-    .replace(/[aƒÂ¢a¢â€šÂ¬a¢â‚¬ÂaƒÂ¢a¢â€šÂ¬a¢â‚¬Å“a¢â‚¬â€a¢â‚¬â€œ]/g, "-")
+    .replace(/[\u2013\u2014\u2012\u2015\u2010\u2011\uFE58\uFE63\uFF0D]/g, "-")
     .replace(/(?<=\d)\s*[Xx]\s*(?=\d)/g, "x")
     .replace(/\b(\d{1,3})\s+(?=\d{1,4}\s*x)/gi, "$1")
     .replace(/(?<=x)\s+(?=\d)/gi, "")

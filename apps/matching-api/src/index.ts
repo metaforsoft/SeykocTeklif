@@ -8,7 +8,7 @@ import { getModelStatus, retrainModelFromHistory } from "./ml";
 import { rerankResults } from "./rerank";
 import { extractSourceDocument } from "./source-extract";
 import { recordExtractionFeedback, saveExtractionProfile } from "./extraction-learning";
-import { commitInstructionPolicy, parseMatchPolicy, planInstructionMessage } from "./instruction-policies";
+import { commitInstructionPolicy, parseMatchPolicy, planInstructionMessage, parseRuleDefinitionWithLlm } from "./instruction-policies";
 import { evaluateHardRules, evaluateSoftBoosts, MatchingRuleRecord, RuleCondition, RuleEffect } from "./rule-engine";
 import { authenticateCredentials, createSession, destroySession, ensureDefaultAdminUser, hashPassword, resolveRequestUser, shouldRedirectToLogin, isPublicPath } from "./auth";
 import { getLookupOptions, postUyumRequest } from "./uyum-lookups";
@@ -91,6 +91,7 @@ interface SaveMatchedOfferBody {
   paymentPlanCode?: string | null;
   incotermName?: string | null;
   transportTypeCode?: string | null;
+  specialCode?: string | null;
   deliveryDate?: string | null;
   description?: string | null;
   rows: MatchedOfferLineInput[];
@@ -106,8 +107,10 @@ interface SendMatchedOfferToErpBody {
   paymentPlanCode?: string | null;
   incotermName?: string | null;
   transportTypeCode?: string | null;
+  specialCode?: string | null;
   deliveryDate?: string | null;
   description?: string | null;
+  continueOnUyumWarning?: boolean | null;
   rows: MatchedOfferLineInput[];
 }
 
@@ -163,6 +166,7 @@ interface InsertOfferPayload {
     SalesPersonCode: string;
     TransportTypeCode?: string;
     PaymentPlanCode?: string;
+    CatCode1?: string;
     ShippingDate?: string;
     DeliveryDate?: string;
     amt: number;
@@ -174,6 +178,7 @@ interface InsertOfferPayload {
     DocNumberDId: number;
     /** Belge numarası */
     DocNo: string;
+    Note1?: string;
     /** Kur oranı (master) */
     CurRateTra: number;
   };
@@ -181,6 +186,84 @@ interface InsertOfferPayload {
 
 interface InsertOfferPayloadLowercase {
   value: InsertOfferPayload["Value"];
+}
+
+class UyumConfirmationRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UyumConfirmationRequiredError";
+  }
+}
+
+function isUyumConfirmationWarning(message: string): boolean {
+  const normalized = String(message || "").toLocaleLowerCase("tr-TR");
+  return normalized.includes("http 417")
+    && (
+      normalized.includes("devam etmek")
+      || normalized.includes("10505")
+      || normalized.includes("birim fiyat")
+      || normalized.includes("error_code_not_found")
+    );
+}
+
+function buildUyumWarningConfirmedPayloads(payload: InsertOfferPayload): unknown[] {
+  const confirmationFlags = {
+    IsWarningConfirm: true,
+    IsConfirm: true,
+    IsContinue: true,
+    IsWarningConfirmed: true,
+    WarningConfirmed: true,
+    ConfirmWarning: true,
+    ConfirmWarnings: true,
+    IgnoreWarning: true,
+    ContinueOnWarning: true,
+    ContinueIfWarning: true,
+    IgnoreWarnings: true,
+    AllowZeroPrice: true,
+    AllowZeroUnitPrice: true,
+    WarningCode: "10505",
+    ErrorCode: 10505
+  };
+  const confirmedDetails = payload.Value.details.map((detail) => {
+    const dynamicFields = detail.dynamicFields
+      ? {
+        ...detail.dynamicFields,
+        ZZ_WARNING_CODE: "10505",
+        ZZ_ALLOW_ZERO_PRICE: true
+      }
+      : {
+        ZZ_WARNING_CODE: "10505",
+        ZZ_ALLOW_ZERO_PRICE: true
+      };
+    return {
+      ...detail,
+      ...confirmationFlags,
+      dynamicFields
+    };
+  });
+  const unvalidatedValue = {
+    ...payload.Value,
+    details: confirmedDetails,
+    IsCheck: false,
+    IsValidate: false,
+    CheckRules: false,
+    ValidateRules: false,
+    ...confirmationFlags
+  };
+  const confirmedValue = {
+    ...payload.Value,
+    details: confirmedDetails,
+    ...confirmationFlags
+  };
+
+  return [
+    { ...payload, ...confirmationFlags },
+    { ...payload, Value: confirmedValue },
+    { ...payload, Value: unvalidatedValue },
+    { ...confirmationFlags, value: payload.Value },
+    { ...confirmationFlags, value: confirmedValue },
+    { ...confirmationFlags, value: unvalidatedValue }
+  ];
 }
 
 
@@ -202,24 +285,53 @@ function formatOfferDateForUyum(value: string | null | undefined): string | null
   return `${month}.${day}.${year}`;
 }
 
+function compactDynamicFields(fields: Record<string, string | number | null | undefined>): Record<string, string | number> {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== "")
+  ) as Record<string, string | number>;
+}
+
+function toUyumCuttingValue(value: unknown): number | null {
+  const normalized = String(value ?? "").trim().toLocaleLowerCase("tr-TR");
+  if (!normalized) return null;
+  if (normalized.includes("var") || normalized === "1" || normalized === "true" || normalized === "evet") return 1;
+  if (normalized.includes("yok") || normalized === "2" || normalized === "false" || normalized === "hayir" || normalized === "hayır") return 2;
+  return null;
+}
+
 /**
  * Hem matchInstruction string'ini hem de kalıcı matchPolicy nesnesini birleştirir.
  * Parsing için canonical kaynak olarak parseMatchPolicy (instruction-policies.ts) kullanılır.
  */
 function buildGuidance(instruction: string | undefined, policy: MatchPolicy | null | undefined): MatchGuidance {
+  if (policy) {
+    return {
+      stockCodePrefix: policy.stockCodePrefix ?? null,
+      requiredTerms: policy.requiredTerms ?? [],
+      requiredStockCodeTerms: policy.requiredStockCodeTerms ?? [],
+      requiredStockNameTerms: policy.requiredStockNameTerms ?? [],
+      requiredNonEmptyFields: policy.requiredNonEmptyFields ?? [],
+      preferredSeries: policy.preferredSeries ?? null,
+      preferredTemper: policy.preferredTemper ?? null,
+      preferredProductType: policy.preferredProductType ?? null,
+      preferredDim1: policy.preferredDim1 ?? null,
+      preferredDim2: policy.preferredDim2 ?? null,
+      preferredDim3: policy.preferredDim3 ?? null
+    };
+  }
   const parsed = parseMatchPolicy(instruction ?? "");
   return {
-    stockCodePrefix: policy?.stockCodePrefix ?? parsed?.stockCodePrefix ?? null,
-    requiredTerms: [...new Set([...(policy?.requiredTerms ?? []), ...(parsed?.requiredTerms ?? [])])],
-    requiredStockCodeTerms: [...new Set([...(policy?.requiredStockCodeTerms ?? []), ...(parsed?.requiredStockCodeTerms ?? [])])],
-    requiredStockNameTerms: [...new Set([...(policy?.requiredStockNameTerms ?? []), ...(parsed?.requiredStockNameTerms ?? [])])],
-    requiredNonEmptyFields: [...new Set([...(policy?.requiredNonEmptyFields ?? []), ...(parsed?.requiredNonEmptyFields ?? [])])],
-    preferredSeries: policy?.preferredSeries ?? parsed?.preferredSeries ?? null,
-    preferredTemper: policy?.preferredTemper ?? parsed?.preferredTemper ?? null,
-    preferredProductType: policy?.preferredProductType ?? parsed?.preferredProductType ?? null,
-    preferredDim1: policy?.preferredDim1 ?? parsed?.preferredDim1 ?? null,
-    preferredDim2: policy?.preferredDim2 ?? parsed?.preferredDim2 ?? null,
-    preferredDim3: policy?.preferredDim3 ?? parsed?.preferredDim3 ?? null
+    stockCodePrefix: parsed?.stockCodePrefix ?? null,
+    requiredTerms: parsed?.requiredTerms ?? [],
+    requiredStockCodeTerms: parsed?.requiredStockCodeTerms ?? [],
+    requiredStockNameTerms: parsed?.requiredStockNameTerms ?? [],
+    requiredNonEmptyFields: parsed?.requiredNonEmptyFields ?? [],
+    preferredSeries: parsed?.preferredSeries ?? null,
+    preferredTemper: parsed?.preferredTemper ?? null,
+    preferredProductType: parsed?.preferredProductType ?? null,
+    preferredDim1: parsed?.preferredDim1 ?? null,
+    preferredDim2: parsed?.preferredDim2 ?? null,
+    preferredDim3: parsed?.preferredDim3 ?? null
   };
 }
 
@@ -279,6 +391,45 @@ function applyGuidanceFilters(candidates: CandidateRow[], guidance: MatchGuidanc
     if (guidance.stockCodePrefix) {
       const stockCode = (candidate.stock_code ?? "").toUpperCase();
       if (!stockCode.startsWith(guidance.stockCodePrefix)) {
+        return false;
+      }
+    }
+
+    if (guidance.preferredSeries && candidate.series !== guidance.preferredSeries) {
+      return false;
+    }
+
+    if (guidance.preferredTemper) {
+      const temper = (candidate.temper ?? candidate.tamper ?? "").toLocaleUpperCase("tr-TR");
+      if (temper !== guidance.preferredTemper) {
+        return false;
+      }
+    }
+
+    if (guidance.preferredProductType) {
+      const productType = (candidate.product_type ?? candidate.cinsi ?? "").toLocaleUpperCase("tr-TR");
+      if (productType !== guidance.preferredProductType) {
+        return false;
+      }
+    }
+
+    if (guidance.preferredDim1 != null) {
+      const dim1 = Number(candidate.dim1 ?? candidate.erp_cap);
+      if (!Number.isFinite(dim1) || Math.abs(dim1 - Number(guidance.preferredDim1)) > 0.001) {
+        return false;
+      }
+    }
+
+    if (guidance.preferredDim2 != null) {
+      const dim2 = Number(candidate.dim2 ?? candidate.erp_en);
+      if (!Number.isFinite(dim2) || Math.abs(dim2 - Number(guidance.preferredDim2)) > 0.001) {
+        return false;
+      }
+    }
+
+    if (guidance.preferredDim3 != null) {
+      const dim3 = Number(candidate.dim3 ?? candidate.erp_boy);
+      if (!Number.isFinite(dim3) || Math.abs(dim3 - Number(guidance.preferredDim3)) > 0.001) {
         return false;
       }
     }
@@ -528,17 +679,36 @@ async function _loadActiveRulesFromDb(): Promise<MatchingRuleRecord[]> {
     condition_json: row.condition_json,
     effect_json: row.effect_json,
     stop_on_match: row.stop_on_match,
-    description: row.description
-  } as MatchingRuleRecord)); // Cast safe for now, will update RuleRecord
+    description: row.description,
+    locked: (row as any).locked ?? false
+  } as MatchingRuleRecord));
 }
 
-async function loadActiveRules(): Promise<MatchingRuleRecord[]> {
-  if (_activeHardRulesCache && Date.now() - _activeHardRulesCache.loadedAt < RULE_CACHE_TTL_MS) {
-    return _activeHardRulesCache.rules;
+async function loadActiveRules(scope?: { customerCode?: string | null; customerName?: string | null }): Promise<MatchingRuleRecord[]> {
+  // Global kurallar her zaman cache'den gelir
+  if (!_activeHardRulesCache || Date.now() - _activeHardRulesCache.loadedAt >= RULE_CACHE_TTL_MS) {
+    const rules = await _loadActiveRulesFromDb();
+    _activeHardRulesCache = { rules, loadedAt: Date.now() };
   }
-  const rules = await _loadActiveRulesFromDb();
-  _activeHardRulesCache = { rules, loadedAt: Date.now() };
-  return rules;
+
+  const allRules = _activeHardRulesCache.rules;
+
+  if (!scope?.customerCode && !scope?.customerName) {
+    // Sadece global kurallar
+    return allRules.filter((r) => !r.scope_type || r.scope_type === "global");
+  }
+
+  // Global + cari bazlı kurallar
+  return allRules.filter((r) => {
+    if (!r.scope_type || r.scope_type === "global") return true;
+    if (r.scope_type === "customer" && r.scope_value) {
+      const val = r.scope_value.toUpperCase();
+      const codeMatch = scope.customerCode && val === scope.customerCode.toUpperCase();
+      const nameMatch = scope.customerName && val === scope.customerName.toUpperCase();
+      return codeMatch || nameMatch;
+    }
+    return false;
+  });
 }
 
 async function loadAllRules(): Promise<Array<MatchingRuleRecord & { active: boolean }>> {
@@ -650,11 +820,19 @@ async function loadInstructionPolicies(): Promise<Array<{
 async function loadCandidateRowsByStockIds(stockIds: number[]): Promise<CandidateRow[]> {
   if (stockIds.length === 0) return [];
   const sqlProductTypeExpr = "COALESCE(NULLIF(sm.cinsi, ''), sf.product_type)";
-  const sqlSeriesExpr = "NULLIF(sm.alasim, '')";
+  // alasim alanından 4 haneli seri numarasını çek ("5083 H321" → "5083", "AL5083" → "5083")
+  const sqlSeriesExpr = `CASE
+    WHEN NULLIF(sm.alasim, '') ~ '^[1-9][0-9]{3}$' THEN sm.alasim
+    WHEN NULLIF(sm.alasim, '') ~ '[1-9][0-9]{3}'
+      THEN (regexp_match(NULLIF(sm.alasim, ''), '[1-9][0-9]{3}'))[1]
+    ELSE NULL
+  END`;
   const sqlSeriesGroupExpr = `COALESCE(
     CASE
       WHEN NULLIF(sm.alasim, '') ~ '^[1-9][0-9]{3}$'
-      THEN SUBSTRING(NULLIF(sm.alasim, '') FROM 1 FOR 1) || '000'
+        THEN SUBSTRING(NULLIF(sm.alasim, '') FROM 1 FOR 1) || '000'
+      WHEN NULLIF(sm.alasim, '') ~ '[1-9][0-9]{3}'
+        THEN SUBSTRING((regexp_match(NULLIF(sm.alasim, ''), '[1-9][0-9]{3}'))[1] FROM 1 FOR 1) || '000'
       ELSE NULL
     END
   )`;
@@ -673,6 +851,8 @@ async function loadCandidateRowsByStockIds(stockIds: number[]): Promise<Candidat
        sm.alasim,
        sm.cinsi,
        sm.specific_gravity::float8 AS specific_gravity,
+       sm.weight_formula,
+       sm.scrap_formula,
        ${sqlTemperExpr} AS tamper,
        ${sqlProductTypeExpr} AS product_type,
        ${sqlSeriesExpr} AS series,
@@ -779,6 +959,8 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
   const rows = Array.isArray(body.rows) ? body.rows : [];
   const transportTypeCode = String(body.transportTypeCode ?? body.incotermName ?? "").trim() || null;
   const paymentPlanCode = String(body.paymentPlanCode ?? "").trim() || null;
+  const specialCode = String(body.specialCode ?? "").trim() || null;
+  const note1 = String(body.description ?? "").trim() || null;
   const shippingDate = formatOfferDateForUyum(body.deliveryDate ?? null);
   const deliveryDate = formatOfferDateForUyum(body.deliveryDate ?? null);
   const stockIds = [...new Set(rows.map((row) => normalizePositiveInteger(row.selected_stock_id)).filter((value): value is number => Boolean(value)))];
@@ -827,13 +1009,15 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
       lineNo: (index + 1) * 10,
       curTraId: 114,
       CurRateTra: 1,
-      dynamicFields: {
+      dynamicFields: compactDynamicFields({
         ZZ_HEIGHT: toSafeNumber(row.dimBoy),
         ZZ_WIDTH: toSafeNumber(row.dimEn),
-        ZZ_Thickness: toSafeNumber(row.dimKalinlik),
+        ZZ_THICKNESS: toSafeNumber(row.dimKalinlik),
         ZZ_CUSTOMER_PART: String(row.musteriParcaNo ?? "").trim() || null,
-        ZZ_CUSTOMER_NO: String(row.musteriNo ?? "").trim() || null
-      }
+        ZZ_CUSTOMER_NO: String(row.musteriNo ?? "").trim() || null,
+        ZZ_CUTTING: toUyumCuttingValue(row.kesimDurumu),
+        ZZ_QTY_SHAVINGS: toSafeNumber(row.talasMik)
+      })
     };
   });
 
@@ -846,27 +1030,49 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
       SalesPersonCode: String(body.representativeCode ?? "").trim(),
       TransportTypeCode: transportTypeCode ?? undefined,
       PaymentPlanCode: paymentPlanCode ?? undefined,
+      CatCode1: specialCode ?? undefined,
       ShippingDate: shippingDate ?? undefined,
       DeliveryDate: deliveryDate ?? undefined,
       amt: details.reduce((sum, item) => sum + item.amt, 0),
-      curTra: 2220,
+      curTra: 1,
       curId: 114,
       coId: 2715,
       branchId: 6749,
       DocNumberDId: 1635,
       DocNo: "0",
+      Note1: note1 ?? undefined,
       CurRateTra: 1
     }
   };
 }
 
-async function sendInsertOfferToUyum(payload: InsertOfferPayload): Promise<unknown> {
+async function sendInsertOfferToUyum(payload: InsertOfferPayload, options: { continueOnWarning?: boolean } = {}): Promise<unknown> {
   try {
     return await postUyumRequest("/UyumApi/v1/PSM/InsertOffer", payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes("HTTP 417")) {
       throw error;
+    }
+
+    if (isUyumConfirmationWarning(message)) {
+      if (!options.continueOnWarning) {
+        throw new UyumConfirmationRequiredError(message);
+      }
+
+      let lastError: unknown = error;
+      for (const confirmedPayload of buildUyumWarningConfirmedPayloads(payload)) {
+        try {
+          return await postUyumRequest("/UyumApi/v1/PSM/InsertOffer", confirmedPayload);
+        } catch (confirmedError) {
+          lastError = confirmedError;
+          const confirmedMessage = confirmedError instanceof Error ? confirmedError.message : String(confirmedError);
+          if (confirmedMessage.includes("HTTP 401") || confirmedMessage.includes("HTTP 403")) {
+            throw confirmedError;
+          }
+        }
+      }
+      throw lastError;
     }
 
     const fallbackPayload: InsertOfferPayloadLowercase = {
@@ -891,6 +1097,7 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
     const warehouseCode = String(body.warehouseCode ?? "").trim() || null;
     const paymentPlanCode = String(body.paymentPlanCode ?? "").trim() || null;
     const incotermName = String(body.transportTypeCode ?? body.incotermName ?? "").trim() || null;
+    const specialCode = String(body.specialCode ?? "").trim() || null;
     const deliveryDate = String(body.deliveryDate ?? "").trim() || null;
     const description = String(body.description ?? "").trim() || null;
     let offerId = Number(body.offerId);
@@ -899,9 +1106,9 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
       const insertRes = await client.query<{ id: string }>(
         `INSERT INTO matched_offers(
            title, source_name, source_type, extraction_method, profile_name, created_by_user_id, line_count, status,
-           offer_date, movement_code, customer_code, representative_code, warehouse_code, payment_plan_code, incoterm_name, delivery_date, description
+           offer_date, movement_code, customer_code, representative_code, warehouse_code, payment_plan_code, incoterm_name, special_code, delivery_date, description
          )
-         VALUES($1,$2,$3,$4,$5,$6,$7,'saved',$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         VALUES($1,$2,$3,$4,$5,$6,$7,'saved',$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
          RETURNING id::text`,
         [
           normalizedTitle,
@@ -918,6 +1125,7 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           warehouseCode,
           paymentPlanCode,
           incotermName,
+          specialCode,
           deliveryDate,
           description
         ]
@@ -953,8 +1161,9 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
              warehouse_code=$12,
              payment_plan_code=$13,
              incoterm_name=$14,
-             delivery_date=$15,
-             description=$16,
+             special_code=$15,
+             delivery_date=$16,
+             description=$17,
              updated_at=NOW()
          WHERE id=$1`,
         [
@@ -972,6 +1181,7 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           warehouseCode,
           paymentPlanCode,
           incotermName,
+          specialCode,
           deliveryDate,
           description
         ]
@@ -1302,6 +1512,7 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
     warehouse_code: string | null;
     payment_plan_code: string | null;
     incoterm_name: string | null;
+    special_code: string | null;
     delivery_date: string | null;
     description: string | null;
     status: string | null;
@@ -1311,7 +1522,7 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
     `SELECT id::text, title, source_name, source_type, extraction_method, profile_name,
             TO_CHAR(offer_date, 'YYYY-MM-DD') AS offer_date,
             movement_code, customer_code, representative_code,
-            warehouse_code, payment_plan_code, incoterm_name,
+            warehouse_code, payment_plan_code, incoterm_name, special_code,
             TO_CHAR(delivery_date, 'YYYY-MM-DD') AS delivery_date,
             description,
             status, created_by_user_id::text, created_at
@@ -1380,6 +1591,7 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
       paymentPlanCode: offer.payment_plan_code,
       incotermName: offer.incoterm_name,
       transportTypeCode: offer.incoterm_name,
+      specialCode: offer.special_code,
       deliveryDate: offer.delivery_date,
       description: offer.description,
       status: offer.status,
@@ -1408,6 +1620,42 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
       birim: row.birim
     }))
   };
+});
+
+app.delete<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser || authUser.role !== "admin") {
+    return reply.code(403).send({ error: "Admin yetkisi gerekli" });
+  }
+
+  const offerId = Number(request.params.id);
+  if (!Number.isFinite(offerId) || offerId <= 0) {
+    return reply.code(400).send({ error: "Gecersiz kayit id" });
+  }
+
+  const deleteRes = await matchPool.query<{ id: string }>(
+    `DELETE FROM matched_offers
+     WHERE id = $1
+       AND COALESCE(status, '') <> 'sent'
+     RETURNING id::text`,
+    [offerId]
+  );
+
+  if ((deleteRes.rowCount ?? 0) > 0) {
+    return { ok: true };
+  }
+
+  const existingRes = await matchPool.query<{ status: string | null }>(
+    "SELECT status FROM matched_offers WHERE id = $1 LIMIT 1",
+    [offerId]
+  );
+  if (existingRes.rowCount === 0) {
+    return reply.code(404).send({ error: "Kayit bulunamadi" });
+  }
+  if (String(existingRes.rows[0]?.status ?? "").trim().toLowerCase() === "sent") {
+    return reply.code(409).send({ error: "ERP'ye gonderilmis kayit silinemez" });
+  }
+  return reply.code(500).send({ error: "Kayit silinemedi" });
 });
 
 app.post<{ Body: SaveMatchedOfferBody }>("/matched-offers/save", async (request, reply) => {
@@ -1464,7 +1712,10 @@ app.post<{ Body: SendMatchedOfferToErpBody }>("/matched-offers/send-erp", async 
     }
 
     const payload = await buildInsertOfferPayload(request.body);
-    const uyumResponse = await sendInsertOfferToUyum(payload);
+    request.log.info({ payload }, "sending matched offer payload to uyum");
+    const uyumResponse = await sendInsertOfferToUyum(payload, {
+      continueOnWarning: request.body?.continueOnUyumWarning === true
+    });
     if (offerId) {
       await matchPool.query(
         `UPDATE matched_offers
@@ -1482,6 +1733,13 @@ app.post<{ Body: SendMatchedOfferToErpBody }>("/matched-offers/send-erp", async 
   } catch (error) {
     request.log.error({ err: error, offerId: request.body?.offerId ?? null }, "matched offer send to erp failed");
     const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof UyumConfirmationRequiredError) {
+      return reply.code(409).send({
+        error: "Uyum onayi gerekli",
+        confirmationRequired: true,
+        warningMessage: message
+      });
+    }
     return reply.code(500).send({ error: message });
   }
 });
@@ -1505,9 +1763,9 @@ app.post<{ Body: { rows?: ExportMatchedTableRowInput[] } }>("/exports/matched-ta
     "Adet": row.adet ?? "",
     "Kg": row.kg ?? "",
     "Birim Fiyat": row.birimFiyat ?? "",
-    "TalaÅŸ Mik.": row.talasMik ?? "",
-    "MÃ¼ÅŸteri No": String(row.musteriNo ?? "").trim(),
-    "MÃ¼ÅŸteri ParÃ§a No": String(row.musteriParcaNo ?? "").trim()
+    "Talaş Mik.": row.talasMik ?? "",
+    "Müşteri No": String(row.musteriNo ?? "").trim(),
+    "Müşteri Parça No": String(row.musteriParcaNo ?? "").trim()
   }));
 
   const workbook = XLSX.utils.book_new();
@@ -1549,6 +1807,8 @@ app.get("/stocks", async () => {
     erp_yukseklik: number | null;
     erp_cap: number | null;
     specific_gravity: number | null;
+    weight_formula: string | null;
+    scrap_formula: string | null;
     cinsi: string | null;
     alasim: string | null;
     tamper: string | null;
@@ -1563,6 +1823,8 @@ app.get("/stocks", async () => {
        sm.erp_yukseklik,
        sm.erp_cap,
        sm.specific_gravity,
+       sm.weight_formula,
+       sm.scrap_formula,
        sm.cinsi,
        sm.alasim,
        sm.tamper
@@ -1583,6 +1845,8 @@ app.get("/stocks", async () => {
       erp_yukseklik: row.erp_yukseklik,
       erp_cap: row.erp_cap,
       specific_gravity: row.specific_gravity,
+      weight_formula: row.weight_formula,
+      scrap_formula: row.scrap_formula,
       cinsi: row.cinsi,
       alasim: row.alasim,
       tamper: row.tamper
@@ -1605,7 +1869,17 @@ function validateRuleCondition(cond: any): boolean {
   if (Array.isArray(cond.all)) return cond.all.every(validateRuleCondition);
   if (Array.isArray(cond.any)) return cond.any.every(validateRuleCondition);
   if (cond.not) return validateRuleCondition(cond.not);
-  const ops = ["=", "!=", ">", ">=", "<", "<=", "starts_with", "contains", "exists", "between", "in", "not_in"];
+  const ops = [
+    "=", "eq",
+    "!=", "ne",
+    ">", "gt",
+    ">=", "gte",
+    "<", "lt",
+    "<=", "lte",
+    "starts_with", "ends_with", "contains",
+    "exists", "not_exists",
+    "between", "in", "not_in"
+  ];
   if (typeof cond.field === "string" && typeof cond.op === "string" && ops.includes(cond.op)) {
     return true;
   }
@@ -1655,6 +1929,8 @@ app.post<{
   const description = String(request.body?.description ?? "").trim() || null;
   const createdBy = String(request.body?.createdBy ?? "").trim() || null;
 
+  const isLocked = (request.body as any)?.is_locked === true || (request.body as any)?.isLocked === true;
+
   if (!conditionJson || !effectJson) {
     return reply.code(400).send({ error: "conditionJson ve effectJson gerekli" });
   }
@@ -1689,10 +1965,10 @@ app.post<{
       }
     } else {
       const ruleSetInsert = await client.query<{ id: string }>(
-        `INSERT INTO matching_rule_sets(name, scope_type, scope_value, priority, active, created_by)
-         VALUES($1,$2,$3,$4,$5,$6)
+        `INSERT INTO matching_rule_sets(name, scope_type, scope_value, priority, active, created_by, locked)
+         VALUES($1,$2,$3,$4,$5,$6,$7)
          RETURNING id::text`,
-        [ruleSetName, scopeType, scopeValue, priority, active, createdBy]
+        [ruleSetName, scopeType, scopeValue, priority, active, createdBy, isLocked]
       );
       ruleSetId = Number(ruleSetInsert.rows[0].id);
     }
@@ -1818,6 +2094,51 @@ app.put<{
   return { ok: true };
 });
 
+app.delete<{
+  Params: { id: string };
+}>("/matching-rules/:id", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser || authUser.role !== "admin") {
+    return reply.code(403).send({ error: "Admin yetkisi gerekli" });
+  }
+
+  const ruleId = Number(request.params.id);
+  if (!Number.isFinite(ruleId) || ruleId <= 0) {
+    return reply.code(400).send({ error: "gecersiz rule id" });
+  }
+
+  const client = await matchPool.connect();
+  try {
+    await client.query("BEGIN");
+    const existing = await client.query<{ rule_set_id: string }>(
+      "SELECT rule_set_id::text FROM matching_rules WHERE id = $1 FOR UPDATE",
+      [ruleId]
+    );
+    if (existing.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "rule not found" });
+    }
+
+    const ruleSetId = Number(existing.rows[0].rule_set_id);
+    await client.query("DELETE FROM matching_rules WHERE id = $1", [ruleId]);
+    await client.query(
+      `UPDATE matching_rule_sets
+       SET version = COALESCE(version, 0) + 1,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [ruleSetId]
+    );
+    await client.query("COMMIT");
+    invalidateRuleCache();
+    return { ok: true };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
 app.put<{
   Params: { id: string };
   Body: {
@@ -1905,6 +2226,48 @@ app.post<{
       stock_name: candidate.stock_name,
       rule_hits: evaluation.candidateRuleHits.get(Number(candidate.stock_id)) ?? []
     }))
+  };
+});
+
+/**
+ * Admin doğal dille kural yazar, LLM JSON'a çevirir ve önizleme döner.
+ * Kullanıcı onaylarsa UI /matching-rules endpoint'ine POST atar.
+ * Özel kural-odaklı LLM çağrısı kullanır — her zaman kural üretir.
+ */
+app.post<{
+  Body: { message?: string };
+}>("/admin/rules/plan", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser || authUser.role !== "admin") {
+    return reply.code(403).send({ error: "Admin yetkisi gerekli" });
+  }
+  const message = String(request.body?.message ?? "").trim();
+  if (!message) {
+    return reply.code(400).send({ error: "message gerekli" });
+  }
+  const rulePlan = await parseRuleDefinitionWithLlm(message);
+  if (rulePlan) {
+    return {
+      ok: true,
+      intent: "new_rule",
+      rulePreview: {
+        ruleType: rulePlan.ruleType,
+        scopeType: rulePlan.scopeType,
+        scopeValue: rulePlan.scopeValue,
+        description: rulePlan.description,
+        isLocked: rulePlan.isLocked,
+        conditionJson: rulePlan.condition,
+        effectJson: rulePlan.effect
+      },
+      explanation: `Kural tanımlandı: "${rulePlan.description}". Onaylarsanız sisteme kaydedilecek.`,
+      confirmationRequired: true
+    };
+  }
+  return {
+    ok: false,
+    intent: "unknown",
+    explanation: "Bu metin bir kural tanımı olarak anlaşılamadı. Lütfen daha açık bir kural yazın.",
+    confirmationRequired: false
   };
 });
 
@@ -2144,7 +2507,7 @@ app.post<{
   return { ok: true, ...result };
 });
 
-app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
+app.post<{ Body: MatchInput & { customerCode?: string; customerName?: string } }>("/match", async (request, reply) => {
   const text = request.body?.text?.trim() ?? "";
   const topK = Math.max(1, Math.min(20, request.body?.topK ?? 5));
 
@@ -2158,13 +2521,23 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     .filter((n): n is number => typeof n === "number" && Number.isFinite(n))
     .sort((a, b) => a - b)[0] ?? null;
   const candidateLimit = hasInputDims ? 350 : 120;
+  const customerCode = String(request.body?.customerCode ?? "").trim() || null;
+  const customerName = String(request.body?.customerName ?? "").trim() || null;
   const guidance = buildGuidance(request.body?.matchInstruction, request.body?.matchPolicy);
   const sqlProductTypeExpr = "COALESCE(NULLIF(sm.cinsi, ''), sf.product_type)";
-  const sqlSeriesExpr = "NULLIF(sm.alasim, '')";
+  // alasim'dan 4 haneli seri çek: "5083 H321" → "5083", "AL5083" → "5083"
+  const sqlSeriesExpr = `CASE
+    WHEN NULLIF(sm.alasim, '') ~ '^[1-9][0-9]{3}$' THEN sm.alasim
+    WHEN NULLIF(sm.alasim, '') ~ '[1-9][0-9]{3}'
+      THEN (regexp_match(NULLIF(sm.alasim, ''), '[1-9][0-9]{3}'))[1]
+    ELSE NULL
+  END`;
   const sqlSeriesGroupExpr = `COALESCE(
     CASE
       WHEN NULLIF(sm.alasim, '') ~ '^[1-9][0-9]{3}$'
-      THEN SUBSTRING(NULLIF(sm.alasim, '') FROM 1 FOR 1) || '000'
+        THEN SUBSTRING(NULLIF(sm.alasim, '') FROM 1 FOR 1) || '000'
+      WHEN NULLIF(sm.alasim, '') ~ '[1-9][0-9]{3}'
+        THEN SUBSTRING((regexp_match(NULLIF(sm.alasim, ''), '[1-9][0-9]{3}'))[1] FROM 1 FOR 1) || '000'
       ELSE NULL
     END
   )`;
@@ -2194,6 +2567,60 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     idx += 1;
   }
 
+  const instructionConditions: string[] = ["sm.is_active = TRUE"];
+  const instructionParams: unknown[] = [extracted.normalized_text];
+  let instructionIdx = 2;
+  const addInstructionParam = (value: unknown): string => {
+    instructionParams.push(value);
+    const placeholder = `$${instructionIdx}`;
+    instructionIdx += 1;
+    return placeholder;
+  };
+
+  if (guidance.stockCodePrefix) {
+    const param = addInstructionParam(`${guidance.stockCodePrefix}%`);
+    instructionConditions.push(`UPPER(COALESCE(sm.stock_code, '')) LIKE ${param}`);
+  }
+  if (guidance.preferredSeries) {
+    const seriesParam = addInstructionParam(guidance.preferredSeries);
+    const groupParam = addInstructionParam(`${guidance.preferredSeries[0]}000`);
+    instructionConditions.push(`(${sqlSeriesExpr} = ${seriesParam} OR ${sqlSeriesGroupExpr} = ${groupParam})`);
+  }
+  if (guidance.preferredTemper) {
+    const param = addInstructionParam(guidance.preferredTemper);
+    instructionConditions.push(`UPPER(COALESCE(${sqlTemperExpr}, '')) = ${param}`);
+  }
+  if (guidance.preferredProductType) {
+    const param = addInstructionParam(guidance.preferredProductType);
+    instructionConditions.push(`UPPER(COALESCE(${sqlProductTypeExpr}, '')) = ${param}`);
+  }
+  if (guidance.preferredDim1 != null) {
+    const param = addInstructionParam(guidance.preferredDim1);
+    instructionConditions.push(`COALESCE(NULLIF(sm.erp_cap, 0)::float8, sf.dim1::float8) IS NOT NULL AND ABS(COALESCE(NULLIF(sm.erp_cap, 0)::float8, sf.dim1::float8) - ${param}) <= 0.2`);
+  }
+  if (guidance.preferredDim2 != null) {
+    const param = addInstructionParam(guidance.preferredDim2);
+    instructionConditions.push(`COALESCE(NULLIF(sm.erp_en, 0)::float8, sf.dim2::float8) IS NOT NULL AND ABS(COALESCE(NULLIF(sm.erp_en, 0)::float8, sf.dim2::float8) - ${param}) <= 0.2`);
+  }
+  if (guidance.preferredDim3 != null) {
+    const param = addInstructionParam(guidance.preferredDim3);
+    instructionConditions.push(`COALESCE(NULLIF(sm.erp_boy, 0)::float8, sf.dim3::float8) IS NOT NULL AND ABS(COALESCE(NULLIF(sm.erp_boy, 0)::float8, sf.dim3::float8) - ${param}) <= 0.2`);
+  }
+  for (const term of guidance.requiredStockCodeTerms ?? []) {
+    const param = addInstructionParam(`%${String(term).toLocaleUpperCase("tr-TR")}%`);
+    instructionConditions.push(`UPPER(COALESCE(sm.stock_code, '')) LIKE ${param}`);
+  }
+  for (const term of guidance.requiredStockNameTerms ?? []) {
+    const param = addInstructionParam(`%${String(term).toLocaleLowerCase("tr-TR")}%`);
+    instructionConditions.push(`LOWER(COALESCE(sm.stock_name, '')) LIKE ${param}`);
+  }
+  for (const term of guidance.requiredTerms ?? []) {
+    const param = addInstructionParam(`%${String(term).toLocaleLowerCase("tr-TR")}%`);
+    instructionConditions.push(`LOWER(COALESCE(sm.stock_code, '') || ' ' || COALESCE(sm.stock_name, '')) LIKE ${param}`);
+  }
+
+  const hasInstructionGuidance = instructionConditions.length > 1;
+
   const exactCapCondition = inputThickness !== null
     ? `${sqlErpCapExpr} IS NOT NULL AND ABS(${sqlErpCapExpr} - $CAP$) <= 0.2`
     : null;
@@ -2219,6 +2646,8 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
       sm.alasim,
       sm.cinsi,
       sm.specific_gravity::float8 AS specific_gravity,
+      sm.weight_formula,
+      sm.scrap_formula,
       ${sqlTemperExpr} AS tamper,
       ${sqlProductTypeExpr} AS product_type,
       ${sqlSeriesExpr} AS series,
@@ -2236,6 +2665,12 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     LIMIT ${limit}
   `;
   const searchStages = [
+    ...(hasInstructionGuidance ? [{
+      name: "instruction_guided",
+      whereSql: `WHERE ${instructionConditions.join(" AND ")}`,
+      queryParams: instructionParams,
+      limit: 10000
+    }] : []),
     ...(inputThickness !== null ? [{
       name: "strict_exact_cap",
       whereSql: strictExactCapWhereSql,
@@ -2284,28 +2719,18 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
     series: extracted.series,
     dim_text: extracted.dim_text
   });
-  const hardRules = await loadActiveRules();
-  // 6.2 Scope filtresi: scope_type=global veya scope_type belirtilmemişse tüm isteklere uygulanır
-  const scopedRules = hardRules.filter((r) => {
-    if (!r.scope_type || r.scope_type === "global") return true;
-    // Scope bazlı kurallar şimdilik yalnızca global'e fallback yapar
-    // (customer/source scope genişletme için buraya koşul eklenecek)
-    return false;
-  });
+  // Global + cari bazlı kuralları yükle
+  const scopedRules = await loadActiveRules({ customerCode, customerName });
   ruleSummary.loadedRuleCount = scopedRules.length;
 
   for (const stage of searchStages) {
-    if (stage.name !== "strict" && stage.whereSql === searchStages[0].whereSql && stage.limit === searchStages[0].limit) {
-      continue;
-    }
-
     const candidateRes = await matchPool.query<CandidateRow>(buildSql(stage.whereSql, stage.limit), stage.queryParams);
     if (candidateRes.rows.length === 0) {
       continue;
     }
 
     let guidedCandidates = applyGuidanceFilters(candidateRes.rows, guidance);
-    if (guidedCandidates.length === 0) {
+    if (guidedCandidates.length === 0 && stage.name !== "instruction_guided") {
       guidedCandidates = candidateRes.rows;
     }
 
@@ -2313,7 +2738,14 @@ app.post<{ Body: MatchInput }>("/match", async (request, reply) => {
       continue;
     }
 
-    const hardRuleEval = evaluateHardRules(extracted, guidedCandidates, scopedRules);
+    let hardRuleEval = evaluateHardRules(extracted, guidedCandidates, scopedRules);
+    if (hardRuleEval.candidates.length === 0 && stage.name === "instruction_guided") {
+      hardRuleEval = {
+        candidates: guidedCandidates,
+        audits: [],
+        candidateRuleHits: new Map<number, string[]>()
+      };
+    }
     if (hardRuleEval.candidates.length === 0) {
       ruleSummary.rejectedCandidateCount += guidedCandidates.length;
       pendingRuleAudits.push(...hardRuleEval.audits.map((audit) => ({

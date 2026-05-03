@@ -53,7 +53,15 @@ function formatDateTime(value) {
   if (!value) return "-";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString("tr-TR");
+  return date.toLocaleString("tr-TR", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
 }
 
 function badge(label, tone = "neutral") {
@@ -62,28 +70,46 @@ function badge(label, tone = "neutral") {
 
 function summarizeRuleCondition(condition) {
   if (!condition || typeof condition !== "object") return "-";
+
+  function summarizeSingle(item) {
+    const f = item.field || "?";
+    const op = item.op || item.operator || "?";
+    const v = item.value;
+    if (op === "exists") return `${f} dolu`;
+    if (op === "not_exists") return `${f} boş`;
+    if (op === "between" && Array.isArray(v)) return `${f} ${v[0]}–${v[1]}`;
+    if (op === "in" && Array.isArray(v)) return `${f} ∈ [${v.join(",")}]`;
+    return `${f} ${op} ${v ?? ""}`.trim();
+  }
+
   if (Array.isArray(condition.all)) {
-    return condition.all.map((item) => `${item.field} ${item.operator} ${item.value}`).join(" AND ");
+    return condition.all.map(summarizeSingle).join(" VE ");
   }
   if (Array.isArray(condition.any)) {
-    return condition.any.map((item) => `${item.field} ${item.operator} ${item.value}`).join(" OR ");
+    return condition.any.map(summarizeSingle).join(" VEYA ");
   }
-  if (condition.field && condition.operator) {
-    return `${condition.field} ${condition.operator} ${condition.value ?? ""}`.trim();
-  }
+  if (condition.field) return summarizeSingle(condition);
   return prettyJson(condition);
 }
 
 function summarizeRuleEffect(effect) {
   if (!effect || typeof effect !== "object") return "-";
   const type = String(effect.type || "-");
+  const labels = {
+    "require_prefix": "Önek zorunlu",
+    "reject_prefix": "Önek yasaklı",
+    "require_exact_series": "Seri tam eşleşme",
+    "require_non_null": "Alan dolu olmalı",
+    "reject_if_missing_dimension": "Boyut eksikse ele",
+    "add_score": "Puan ekle",
+    "multiply_score": "Puanı çarp"
+  };
+  const label = labels[type] || type;
   if (effect.value !== undefined && effect.value !== null && effect.value !== "") {
-    return `${type}: ${effect.value}`;
+    return `${label}: ${effect.value}`;
   }
-  if (effect.field) {
-    return `${type}: ${effect.field}`;
-  }
-  return type;
+  if (effect.field) return `${label}: ${effect.field}`;
+  return label;
 }
 
 function renderPolicySummary(policyJson) {
@@ -458,6 +484,206 @@ function auditPanelMarkup() {
   `;
 }
 
+// ── Alan, operatör ve efekt çeviri tabloları ──
+const FIELD_LABELS = {
+  "input.dim1": "Kalınlık (Girdi)",
+  "input.dim2": "En (Girdi)",
+  "input.dim3": "Boy (Girdi)",
+  "input.series": "Alaşım Serisi (Girdi)",
+  "input.temper": "Tamper (Girdi)",
+  "input.product_type": "Ürün Tipi (Girdi)",
+  "candidate.series": "Alaşım Serisi (Stok)",
+  "candidate.temper": "Tamper (Stok)",
+  "candidate.stock_code": "Stok Kodu",
+  "candidate.stock_name": "Stok Adı",
+  "candidate.dim1": "Kalınlık (Stok)",
+  "candidate.dim2": "En (Stok)",
+  "candidate.dim3": "Boy (Stok)",
+  "candidate.erp_cap": "ERP Kalınlık"
+};
+
+const OP_LABELS = {
+  "eq": "eşit",
+  "=": "eşit",
+  "neq": "eşit değil",
+  "!=": "eşit değil",
+  "gt": "büyük",
+  ">": "büyük",
+  "gte": "büyük veya eşit",
+  ">=": "büyük veya eşit",
+  "lt": "küçük",
+  "<": "küçük",
+  "lte": "küçük veya eşit",
+  "<=": "küçük veya eşit",
+  "exists": "dolu (0'dan farklı)",
+  "not_exists": "boş (0 veya yok)",
+  "starts_with": "ile başlar",
+  "not_starts_with": "ile başlamaz",
+  "contains": "içerir",
+  "in": "listede var",
+  "between": "arasında"
+};
+
+const EFFECT_LABELS = {
+  "require_prefix": { icon: "✅", label: "Stok kodu şu önek ile başlamalı" },
+  "reject_prefix": { icon: "🚫", label: "Stok kodu şu önek ile başlamamalı" },
+  "require_exact_series": { icon: "🎯", label: "Alaşım serisi tam eşleşmeli" },
+  "require_non_null": { icon: "📋", label: "Alan boş olmamalı" },
+  "reject_if_missing_dimension": { icon: "📏", label: "Boyut bilgisi eksikse stok elenmeli" },
+  "add_score": { icon: "⭐", label: "Puan ekle" },
+  "multiply_score": { icon: "✖️", label: "Puanı çarp" }
+};
+
+function fieldLabel(field) {
+  return FIELD_LABELS[field] || field;
+}
+
+function opLabel(op) {
+  return OP_LABELS[op] || op;
+}
+
+function renderSingleConditionHuman(cond) {
+  if (!cond || typeof cond !== "object") return "-";
+  const field = fieldLabel(cond.field);
+  const op = cond.op || cond.operator || "";
+
+  if (op === "exists" || op === "not_exists") {
+    return `<span class="rule-cond-item"><strong>${escapeHtml(field)}</strong> <em>${escapeHtml(opLabel(op))}</em></span>`;
+  }
+  if (op === "between" && Array.isArray(cond.value)) {
+    return `<span class="rule-cond-item"><strong>${escapeHtml(field)}</strong> <em>${escapeHtml(String(cond.value[0]))} – ${escapeHtml(String(cond.value[1]))} arasında</em></span>`;
+  }
+  if (op === "in" && Array.isArray(cond.value)) {
+    return `<span class="rule-cond-item"><strong>${escapeHtml(field)}</strong> <em>${escapeHtml(cond.value.join(", "))} listesinde</em></span>`;
+  }
+  const val = cond.value !== undefined && cond.value !== null ? String(cond.value) : "";
+  return `<span class="rule-cond-item"><strong>${escapeHtml(field)}</strong> <em>${escapeHtml(opLabel(op))}</em> <code>${escapeHtml(val)}</code></span>`;
+}
+
+function renderConditionHuman(cond) {
+  if (!cond || typeof cond !== "object") return `<span class="rule-cond-empty">Koşul yok</span>`;
+
+  if (Array.isArray(cond.all)) {
+    return cond.all.map(renderSingleConditionHuman).join(`<span class="rule-cond-joiner">VE</span>`);
+  }
+  if (Array.isArray(cond.any)) {
+    return cond.any.map(renderSingleConditionHuman).join(`<span class="rule-cond-joiner">VEYA</span>`);
+  }
+  if (cond.not) {
+    return `<span class="rule-cond-joiner">DEĞİL:</span> ${renderConditionHuman(cond.not)}`;
+  }
+  if (cond.field) {
+    return renderSingleConditionHuman(cond);
+  }
+  return `<span class="rule-cond-empty">Koşul tanımlanamadı</span>`;
+}
+
+function renderEffectHuman(effect) {
+  if (!effect || typeof effect !== "object") return `<span class="rule-cond-empty">Etki yok</span>`;
+  const info = EFFECT_LABELS[effect.type] || { icon: "⚙️", label: effect.type };
+  const val = effect.value !== undefined && effect.value !== null ? String(effect.value) : "";
+  const fieldPart = effect.field ? ` (${escapeHtml(fieldLabel(effect.field))})` : "";
+  return `<div class="rule-effect-item">
+    <span class="rule-effect-icon">${info.icon}</span>
+    <span>${escapeHtml(info.label)}${fieldPart}${val ? `: <code>${escapeHtml(val)}</code>` : ""}</span>
+  </div>`;
+}
+
+function renderNlRulePreview(preview) {
+  if (!preview) return `<div class="empty-box">Henüz önizleme oluşturulmadı. Yukarıya doğal dilde bir kural yazın.</div>`;
+
+  const typeLabel = preview.ruleType === "hard_filter" ? "Zorunlu Kural" : "Tercih Kuralı";
+  const typeClass = preview.ruleType === "hard_filter" ? "rule-preview--hard" : "rule-preview--soft";
+  const typeIcon = preview.ruleType === "hard_filter" ? "🛡️" : "⭐";
+  const scopeLabel = preview.scopeType === "customer" ? `${preview.scopeValue || "?"}` : "Tüm Müşteriler";
+  const scopeIcon = preview.scopeType === "customer" ? "👤" : "🌐";
+
+  return `
+    <article class="rule-preview-card ${typeClass}">
+      <div class="rule-preview-header">
+        <div class="rule-preview-title">
+          <span class="rule-preview-icon">${typeIcon}</span>
+          <h4>${escapeHtml(preview.description)}</h4>
+        </div>
+        <div class="rule-preview-badges">
+          <span class="rule-badge rule-badge--type">${escapeHtml(typeLabel)}</span>
+          <span class="rule-badge rule-badge--scope">${scopeIcon} ${escapeHtml(scopeLabel)}</span>
+          ${preview.isLocked ? `<span class="rule-badge rule-badge--lock">🔒 Kilitli</span>` : ""}
+        </div>
+      </div>
+
+      <div class="rule-preview-body">
+        <div class="rule-section">
+          <div class="rule-section-label">📋 Koşul (Bu durumda):</div>
+          <div class="rule-condition-flow">
+            ${renderConditionHuman(preview.conditionJson)}
+          </div>
+        </div>
+
+        <div class="rule-section-arrow">→</div>
+
+        <div class="rule-section">
+          <div class="rule-section-label">⚡ Sonuç (Şunu uygula):</div>
+          <div class="rule-effect-flow">
+            ${renderEffectHuman(preview.effectJson)}
+          </div>
+        </div>
+      </div>
+
+      <details class="rule-json-detail">
+        <summary>🔧 Teknik Detay (JSON)</summary>
+        <div class="rule-json-grid">
+          <div><strong>Koşul:</strong><pre class="inline-pre">${escapeHtml(prettyJson(preview.conditionJson))}</pre></div>
+          <div><strong>Etki:</strong><pre class="inline-pre">${escapeHtml(prettyJson(preview.effectJson))}</pre></div>
+        </div>
+      </details>
+
+      <div class="rule-preview-actions">
+        <button type="button" class="btn-primary" id="nlRuleConfirmBtn">✅ Kuralı Kaydet</button>
+        <button type="button" class="btn-secondary" id="nlRuleCancelBtn">İptal</button>
+      </div>
+    </article>
+  `;
+}
+
+
+function nlRulePanelMarkup() {
+  return `
+    <section data-rule-panel="nl" class="hidden">
+      <section class="rule-layout rule-layout--single">
+        <article class="form-card">
+          <div class="section-head">
+            <h3>🤖 Doğal Dil ile Kural Oluştur</h3>
+            <p>Kuralınızı doğal dilde yazın, yapay zeka uygun JSON kuralına çevirsin. Onaylamadan kaydedilmez.</p>
+          </div>
+          <form id="nlRuleForm" class="stack-form">
+            <label>
+              <span>Kural Tanımı</span>
+              <textarea name="message" rows="4" placeholder="Örn: kalınlık 0-8 ise ALV ile başlamalı&#10;Örn: CARİ-001 için 5083 veya 5086 serisine +15 puan&#10;Örn: alaşım 7075 ise tam eşleşme zorunlu"></textarea>
+            </label>
+            <button type="submit" class="btn-primary">🔍 Analiz Et</button>
+            <p id="nlRuleStatus" class="form-status"></p>
+          </form>
+          <div id="nlRulePreviewHost" style="margin-top: 16px;">${renderNlRulePreview(null)}</div>
+        </article>
+        <article class="form-card">
+          <div class="section-head">
+            <h3>Nasıl Çalışır?</h3>
+            <p>Doğal dille yazılan talimatlar yapay zeka tarafından kural şemasına dönüştürülür.</p>
+          </div>
+          <div class="note-block">
+            <p><strong>Boyut bazlı:</strong> "kalınlık 0-8 ise ALV ile başlamalı", "en ve boy varsa ACB ile başlayamaz"</p>
+            <p><strong>Seri bazlı:</strong> "alaşım 7075 ise tam eşleşme zorunlu", "5083 serisi öne gelsin"</p>
+            <p><strong>Cari bazlı:</strong> "CARİ-001 için alaşım 5083 veya 5086 olabilir", "XYZ müşterisi için H321 tamper tercih"</p>
+            <p><strong>Soft boost:</strong> "5083 serisine +10 puan ver", "ithal menşei olan stokları öne al"</p>
+            <p>⚠️ Kural doğrudan kaydedilmez, önce size gösterilir ve onayınız beklenir.</p>
+          </div>
+        </article>
+      </section>
+    </section>
+  `;
+}
+
 function parseJsonInput(rawValue, fieldName) {
   const value = String(rawValue ?? "").trim();
   if (!value) return {};
@@ -588,7 +814,7 @@ function renderUsersTable(items) {
       <td>${item.username}</td>
       <td>${item.role}</td>
       <td>${item.isActive ? "Aktif" : "Pasif"}</td>
-      <td>${new Date(item.createdAt).toLocaleString("tr-TR")}</td>
+      <td>${formatDateTime(item.createdAt)}</td>
     </tr>
   `).join("");
 
@@ -688,7 +914,7 @@ function renderOffersTable(items) {
       <td>${item.lineCount}</td>
       <td>${item.createdBy || "-"}</td>
       <td><span class="status-badge ${item.sentToErp ? "status-badge--sent" : "status-badge--draft"}">${item.sentToErp ? "ERP'ye Gönderildi" : "Bekliyor"}</span></td>
-      <td>${new Date(item.createdAt).toLocaleString("tr-TR")}</td>
+      <td>${formatDateTime(item.createdAt)}</td>
     </tr>
   `).join("");
 
@@ -719,6 +945,54 @@ async function renderMatchedOffers() {
   pageTitleEl.textContent = "Eşleşmiş Teklifler";
   const data = await api("/matched-offers");
   pageContentEl.innerHTML = renderOffersTable(data.items);
+
+  const headerRow = pageContentEl.querySelector(".portal-table thead tr");
+  if (headerRow && !headerRow.querySelector("[data-offer-action-head]")) {
+    const th = document.createElement("th");
+    th.setAttribute("data-offer-action-head", "1");
+    th.textContent = "Islem";
+    headerRow.appendChild(th);
+  }
+  pageContentEl.querySelectorAll("[data-offer-id]").forEach((row) => {
+    if (!(row instanceof HTMLElement) || row.querySelector("[data-offer-delete]")) return;
+    const offerId = row.getAttribute("data-offer-id");
+    const offerStatus = String(row.getAttribute("data-offer-status") || "").trim().toLowerCase();
+    const td = document.createElement("td");
+    if (offerStatus === "sent") {
+      td.textContent = "-";
+    } else {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn-danger btn-small";
+      button.setAttribute("data-offer-delete", offerId || "");
+      button.setAttribute("data-offer-title", row.children[1]?.textContent || offerId || "");
+      button.textContent = "Sil";
+      td.appendChild(button);
+    }
+    row.appendChild(td);
+  });
+
+  pageContentEl.querySelectorAll("[data-offer-delete]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const target = event.currentTarget;
+      const offerId = target.getAttribute("data-offer-delete");
+      if (!offerId) return;
+      const title = target.getAttribute("data-offer-title") || offerId;
+      const confirmed = confirm(`Bu eslesmis teklif silinecek:\n${title}\n\nDevam etmek istiyor musunuz?`);
+      if (!confirmed) return;
+      target.setAttribute("disabled", "disabled");
+      try {
+        await api(`/matched-offers/${offerId}`, {
+          method: "DELETE"
+        });
+        await renderMatchedOffers();
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "Kayit silinemedi.");
+        target.removeAttribute("disabled");
+      }
+    });
+  });
 
   pageContentEl.querySelectorAll("[data-offer-id]").forEach((row) => {
     row.addEventListener("click", () => {
@@ -965,11 +1239,15 @@ function renderRulesTableV2(items) {
     <tr>
       <td>${escapeHtml(item.rule_set_name || "default")}</td>
       <td>${item.priority}</td>
+      <td>${escapeHtml(item.scope_type || "global")}${item.scope_value ? ` <em>(${escapeHtml(item.scope_value)})</em>` : ""}</td>
       <td>${escapeHtml(item.description || "-")}</td>
       <td>${escapeHtml(item.rule_type || "hard_filter")}</td>
       <td>${escapeHtml(summarizeRuleCondition(item.condition_json))}</td>
       <td>${escapeHtml(summarizeRuleEffect(item.effect_json))}</td>
-      <td><span class="status-badge ${item.active ? "status-badge--sent" : "status-badge--draft"}">${item.active ? "Aktif" : "Pasif"}</span></td>
+      <td>
+        <span class="status-badge ${item.active ? "status-badge--sent" : "status-badge--draft"}">${item.active ? "Aktif" : "Pasif"}</span>
+        ${item.locked ? badge("🔒 Kilitli", "orange") : ""}
+      </td>
       <td><button type="button" class="btn-secondary btn-small" data-rule-toggle="${item.id}" data-next-active="${item.active ? "0" : "1"}">${item.active ? "Pasifleştir" : "Aktifleştir"}</button></td>
     </tr>
   `).join("");
@@ -981,6 +1259,7 @@ function renderRulesTableV2(items) {
           <tr>
             <th>Set</th>
             <th>Öncelik</th>
+            <th>Kapsam</th>
             <th>Açıklama</th>
             <th>Tip</th>
             <th>Koşul</th>
@@ -1042,6 +1321,28 @@ function renderRuleTestResultV2(data) {
   `;
 }
 
+function appendRuleDeleteButtons(items) {
+  const itemMap = new Map((items || []).map((item) => [String(item.id), item]));
+  document.querySelectorAll("[data-rule-toggle]").forEach((button) => {
+    const ruleId = button.getAttribute("data-rule-toggle");
+    if (!ruleId || button.parentElement?.querySelector(`[data-rule-delete="${ruleId}"]`)) return;
+    if (!button.parentElement?.classList.contains("table-actions")) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "table-actions";
+      button.parentElement?.insertBefore(wrapper, button);
+      wrapper.appendChild(button);
+    }
+    const item = itemMap.get(String(ruleId));
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "btn-danger btn-small";
+    deleteButton.setAttribute("data-rule-delete", ruleId);
+    deleteButton.setAttribute("data-rule-description", item?.description || item?.rule_set_name || ruleId);
+    deleteButton.textContent = "Sil";
+    button.parentElement?.appendChild(deleteButton);
+  });
+}
+
 async function renderMatchingRulesV2() {
   pageEyebrowEl.textContent = "Yönetim";
   pageTitleEl.textContent = "Kural Yönetimi";
@@ -1049,9 +1350,11 @@ async function renderMatchingRulesV2() {
     <section class="rule-page">
       <div class="tab-strip">
         <button type="button" class="tab-btn is-active" data-rule-tab="hard">Zorunlu Kurallar</button>
+        <button type="button" class="tab-btn" data-rule-tab="nl">🤖 Yapay Zeka Kuralı</button>
         <button type="button" class="tab-btn" data-rule-tab="soft">Tercih Talimatları</button>
       </div>
       ${hardRulesPanelMarkup()}
+      ${nlRulePanelMarkup()}
       ${softPreferencesPanelMarkup()}
     </section>
   `;
@@ -1065,6 +1368,7 @@ async function renderMatchingRulesV2() {
   const loadRules = async () => {
     const data = await api("/matching-rules");
     rulesTableHost.innerHTML = renderRulesTableV2(data.items || []);
+    appendRuleDeleteButtons(data.items || []);
   };
   const loadPolicies = async () => {
     const data = await api("/instruction-policies");
@@ -1082,6 +1386,25 @@ async function renderMatchingRulesV2() {
   rulesTableHost.addEventListener("click", async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
+    const deleteRuleId = target.getAttribute("data-rule-delete");
+    if (deleteRuleId) {
+      const description = target.getAttribute("data-rule-description") || deleteRuleId;
+      const confirmed = confirm(`Bu kural silinecek:\n${description}\n\nDevam etmek istiyor musunuz?`);
+      if (!confirmed) return;
+      target.setAttribute("disabled", "disabled");
+      try {
+        await api(`/matching-rules/${deleteRuleId}`, {
+          method: "DELETE"
+        });
+        await loadRules();
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "Kural silinemedi.");
+      } finally {
+        target.removeAttribute("disabled");
+      }
+      return;
+    }
+
     const ruleId = target.getAttribute("data-rule-toggle");
     if (!ruleId) return;
     const nextActive = target.getAttribute("data-next-active") === "1";
@@ -1157,6 +1480,73 @@ async function renderMatchingRulesV2() {
       policyPreviewStatusEl.textContent = "Önizleme oluşturuldu.";
     } catch (error) {
       policyPreviewStatusEl.textContent = error instanceof Error ? error.message : "Önizleme oluşturulamadı.";
+    }
+  });
+
+  // ─── Doğal Dil Kural Formu ───
+  const nlRuleStatusEl = document.getElementById("nlRuleStatus");
+  const nlRulePreviewHost = document.getElementById("nlRulePreviewHost");
+  let _pendingRulePreview = null;
+
+  document.getElementById("nlRuleForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    nlRuleStatusEl.textContent = "Analiz ediliyor...";
+    _pendingRulePreview = null;
+    const form = new FormData(event.currentTarget);
+    const message = String(form.get("message") ?? "").trim();
+    if (!message) {
+      nlRuleStatusEl.textContent = "Lütfen bir kural tanımı girin.";
+      return;
+    }
+    try {
+      const result = await api("/admin/rules/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message })
+      });
+      if (result.ok && result.rulePreview) {
+        _pendingRulePreview = result.rulePreview;
+        nlRulePreviewHost.innerHTML = renderNlRulePreview(result.rulePreview);
+        nlRuleStatusEl.textContent = result.explanation || "Kural önizlemesi oluşturuldu.";
+        document.getElementById("nlRuleConfirmBtn")?.addEventListener("click", async () => {
+          if (!_pendingRulePreview) return;
+          try {
+            await api("/matching-rules", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                rule_set_name: _pendingRulePreview.scopeType === "customer"
+                  ? `customer_${_pendingRulePreview.scopeValue || "unknown"}`
+                  : "ai_generated",
+                scope_type: _pendingRulePreview.scopeType,
+                scope_value: _pendingRulePreview.scopeValue || null,
+                priority: 100,
+                description: _pendingRulePreview.description,
+                rule_type: _pendingRulePreview.ruleType,
+                condition_json: _pendingRulePreview.conditionJson,
+                effect_json: _pendingRulePreview.effectJson,
+                is_locked: _pendingRulePreview.isLocked
+              })
+            });
+            nlRuleStatusEl.textContent = "✅ Kural başarıyla kaydedildi!";
+            _pendingRulePreview = null;
+            nlRulePreviewHost.innerHTML = renderNlRulePreview(null);
+            await loadRules();
+          } catch (err) {
+            nlRuleStatusEl.textContent = err instanceof Error ? err.message : "Kural kaydedilemedi.";
+          }
+        });
+        document.getElementById("nlRuleCancelBtn")?.addEventListener("click", () => {
+          _pendingRulePreview = null;
+          nlRulePreviewHost.innerHTML = renderNlRulePreview(null);
+          nlRuleStatusEl.textContent = "Kural iptal edildi.";
+        });
+      } else {
+        nlRulePreviewHost.innerHTML = renderNlRulePreview(null);
+        nlRuleStatusEl.textContent = result.explanation || "Bu metin bir kural tanımı olarak anlaşılamadı.";
+      }
+    } catch (error) {
+      nlRuleStatusEl.textContent = error instanceof Error ? error.message : "Analiz başarısız.";
     }
   });
 }

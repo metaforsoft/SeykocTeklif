@@ -1,0 +1,3 @@
+ALTER TABLE stock_master
+  ADD COLUMN IF NOT EXISTS weight_formula TEXT NULL,
+  ADD COLUMN IF NOT EXISTS scrap_formula TEXT NULL;

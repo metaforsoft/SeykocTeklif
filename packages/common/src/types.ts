@@ -13,6 +13,8 @@ export interface StockMasterRow {
   erp_yukseklik?: number | null;
   erp_cap?: number | null;
   specific_gravity?: number | null;
+  weight_formula?: string | null;
+  scrap_formula?: string | null;
   cinsi?: string | null;
   alasim?: string | null;
   tamper?: string | null;
@@ -86,6 +88,15 @@ export interface ParsedOrderLine {
   dim3: number | null;
   qty: number | null;
   series: string | null;
+  alasim?: string | null;
+  temper?: string | null;
+  kg?: number | null;
+  birimFiyat?: number | null;
+  talasMik?: number | null;
+  musteriNo?: string | null;
+  musteriParcaNo?: string | null;
+  kesimDurumu?: string | null;
+  mensei?: string | null;
   header_context: string | null;
   confidence: number;
 }
@@ -152,6 +163,8 @@ export interface CandidateRow {
   alasim?: string | null;
   tamper?: string | null;
   specific_gravity?: number | null;
+  weight_formula?: string | null;
+  scrap_formula?: string | null;
   product_type: string | null;
   series: string | null;
   series_group: string | null;
@@ -185,6 +198,13 @@ export interface ScoredResult {
   stock_code: string | null;
   stock_name: string | null;
   birim?: string | null;
+  erp_cap?: number | null;
+  erp_en?: number | null;
+  erp_boy?: number | null;
+  erp_yukseklik?: number | null;
+  specific_gravity?: number | null;
+  weight_formula?: string | null;
+  scrap_formula?: string | null;
   alasim?: string | null;
   tamper?: string | null;
   series?: string | null;

@@ -104,6 +104,127 @@ function toCellNumber(value: unknown): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
+function toCellText(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  return raw.length > 0 ? raw : null;
+}
+
+function parseDimensionText(value: unknown): number[] {
+  const raw = String(value ?? "")
+    .trim()
+    .replace(/,/g, ".");
+  if (!raw || !/[xX*×]/.test(raw)) return [];
+
+  const parts = raw
+    .split(/[xX*×]/)
+    .map((part) => {
+      const match = part.match(/\d+(?:\.\d+)?/);
+      return match ? Number(match[0]) : null;
+    })
+    .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0);
+
+  return parts.length >= 2 && parts.length <= 4 ? parts.slice(0, 3) : [];
+}
+
+function findDimensionTextIndex(headers: string[], rows: unknown[][]): number {
+  let bestIndex = -1;
+  let bestScore = 0;
+  const maxColumns = Math.max(headers.length, ...rows.slice(0, 20).map((row) => row.length));
+
+  for (let index = 0; index < maxColumns; index += 1) {
+    const header = headers[index] ?? "";
+    const headerScore = /\bolcu|\bolculer|\bolculeri|\bebat\b|\bdimension\b|\bsize\b|\bmeasure\b/.test(header) ? 5 : 0;
+    const sampleScore = rows
+      .slice(0, 20)
+      .reduce((sum, row) => sum + (parseDimensionText(row[index]).length >= 2 ? 1 : 0), 0);
+    const score = headerScore + sampleScore;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+
+  return bestScore > 0 ? bestIndex : -1;
+}
+
+function findQuantityIndex(headers: string[], rows: unknown[][]): number {
+  let bestIndex = -1;
+  let bestScore = 0;
+  const maxColumns = Math.max(headers.length, ...rows.slice(0, 20).map((row) => row.length));
+
+  for (let index = 0; index < maxColumns; index += 1) {
+    const header = headers[index] ?? "";
+    const headerScore = /\badet\b|\bmiktar\b|\bmikt\b|\bmik\b|\bqty\b|\bquantity\b/.test(header) ? 10 : 0;
+    const sampleScore = rows
+      .slice(0, 20)
+      .reduce((sum, row) => {
+        const value = toCellNumber(row[index]);
+        return sum + (value !== null && value > 0 && value <= 100000 ? 1 : 0);
+      }, 0);
+    const score = headerScore + sampleScore;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+
+  return bestScore >= 3 ? bestIndex : -1;
+}
+
+function preferDetectedIndex(currentIndex: number, detectedIndex: number): number {
+  return detectedIndex >= 0 ? detectedIndex : currentIndex;
+}
+
+function readRowDimensions(row: unknown[], explicitDimIndexes: number[], dimensionTextIndex: number): number[] {
+  const explicitDims = explicitDimIndexes
+    .map((index) => toCellNumber(row[index]))
+    .filter((value): value is number => value !== null && value > 0);
+  if (explicitDims.length >= 2) return explicitDims;
+
+  if (dimensionTextIndex >= 0) {
+    const textDims = parseDimensionText(row[dimensionTextIndex]);
+    if (textDims.length >= 2) return textDims;
+  }
+
+  for (let index = 0; index < row.length; index += 1) {
+    const textDims = parseDimensionText(row[index]);
+    if (textDims.length >= 2) return textDims;
+  }
+
+  return [];
+}
+
+function normalizeCuttingValue(value: unknown): string | null {
+  const normalized = normalizeHeaderName(value);
+  if (!normalized) return null;
+  if (/\byok\b|\bhayir\b|\bno\b|kesimsiz/.test(normalized)) return "Kesim Yok";
+  if (/\bvar\b|\bevet\b|\byes\b|kesimli|kesim/.test(normalized)) return "Kesim Var";
+  return toCellText(value);
+}
+
+function normalizeOriginValue(value: unknown): string | null {
+  const normalized = normalizeHeaderName(value);
+  if (!normalized) return null;
+  if (/yerli|domestic/.test(normalized)) return "YERL\u0130";
+  if (/ithal|import|imported/.test(normalized)) return "\u0130THAL";
+  return toCellText(value);
+}
+
+function extractSeries(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  const normalized = normalizeHeaderName(raw);
+  const exact = normalized.match(/\b([1-9]\d{3})\b/);
+  if (exact) return exact[1];
+
+  const family = normalized.match(/\b([1-9])\s*(?:x{3}|xxx|000)\b/)
+    || normalized.match(/\b([1-9])\s*(?:bin|seri|serisi)\b/);
+  if (family) return `${family[1]}000`;
+
+  return null;
+}
+
 function findColumnIndex(headers: string[], patterns: RegExp[]): number {
   return headers.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
 }
@@ -127,10 +248,10 @@ function buildInstructionPatterns(instruction: string | null | undefined, bucket
     return [];
   }
 
-  const headerMatches = normalized.match(/["â€œâ€ ']?([a-z0-9]+(?:\s+[a-z0-9]+){0,3})["â€œâ€ ']?\s*(?:kolon|alan|sutun|sÃ¼tun|header|baslik|baÅŸlÄ±k)/g) ?? [];
+  const headerMatches = normalized.match(/["“” '"]?([a-z0-9]+(?:\s+[a-z0-9]+){0,3})["“” '"]?\s*(?:kolon|alan|sutun|sütun|header|baslik|başlık)/g) ?? [];
   for (const match of headerMatches) {
     const cleaned = normalizeHeaderName(match)
-      .replace(/\b(kolon|alan|sutun|sÃ¼tun|header|baslik|baÅŸlÄ±k)\b/g, "")
+      .replace(/\b(kolon|alan|sutun|sütun|header|baslik|başlık)\b/g, "")
       .trim();
     if (cleaned) hints.push(cleaned);
   }
@@ -154,8 +275,17 @@ interface ColumnMapping {
   yIndex: number;
   zIndex: number;
   materialIndex: number;
+  alloyIndex: number;
+  temperIndex: number;
   partIndex: number;
   descIndex: number;
+  kgIndex: number;
+  unitPriceIndex: number;
+  scrapIndex: number;
+  customerNoIndex: number;
+  customerPartNoIndex: number;
+  cuttingIndex: number;
+  originIndex: number;
 }
 
 async function resolveColumnMappingWithLlm(
@@ -230,11 +360,20 @@ async function resolveColumnMappingWithLlm(
                 yIndex: { type: "integer" },
                 zIndex: { type: "integer" },
                 materialIndex: { type: "integer" },
+                alloyIndex: { type: "integer" },
+                temperIndex: { type: "integer" },
                 partIndex: { type: "integer" },
                 descIndex: { type: "integer" },
+                kgIndex: { type: "integer" },
+                unitPriceIndex: { type: "integer" },
+                scrapIndex: { type: "integer" },
+                customerNoIndex: { type: "integer" },
+                customerPartNoIndex: { type: "integer" },
+                cuttingIndex: { type: "integer" },
+                originIndex: { type: "integer" },
                 reasoning: { type: "string" }
               },
-              required: ["qtyIndex", "xIndex", "yIndex", "zIndex", "materialIndex", "partIndex", "descIndex", "reasoning"]
+              required: ["qtyIndex", "xIndex", "yIndex", "zIndex", "materialIndex", "alloyIndex", "temperIndex", "partIndex", "descIndex", "kgIndex", "unitPriceIndex", "scrapIndex", "customerNoIndex", "customerPartNoIndex", "cuttingIndex", "originIndex", "reasoning"]
             }
           }
         }
@@ -276,8 +415,17 @@ async function buildExcelDocument(workbook: XLSX.WorkBook, instruction?: string 
     let yIndex: number;
     let zIndex: number;
     let materialIndex: number;
+    let alloyIndex: number;
+    let temperIndex: number;
     let partIndex: number;
     let descIndex: number;
+    let kgIndex: number;
+    let unitPriceIndex: number;
+    let scrapIndex: number;
+    let customerNoIndex: number;
+    let customerPartNoIndex: number;
+    let cuttingIndex: number;
+    let originIndex: number;
 
     const llmMapping = await resolveColumnMappingWithLlm(rawHeaders, rows.slice(1) as unknown[][], instruction);
 
@@ -287,43 +435,89 @@ async function buildExcelDocument(workbook: XLSX.WorkBook, instruction?: string 
       yIndex = llmMapping.yIndex;
       zIndex = llmMapping.zIndex;
       materialIndex = llmMapping.materialIndex;
+      alloyIndex = llmMapping.alloyIndex;
+      temperIndex = llmMapping.temperIndex;
       partIndex = llmMapping.partIndex;
       descIndex = llmMapping.descIndex;
+      kgIndex = llmMapping.kgIndex;
+      unitPriceIndex = llmMapping.unitPriceIndex;
+      scrapIndex = llmMapping.scrapIndex;
+      customerNoIndex = llmMapping.customerNoIndex;
+      customerPartNoIndex = llmMapping.customerPartNoIndex;
+      cuttingIndex = llmMapping.cuttingIndex;
+      originIndex = llmMapping.originIndex;
     } else {
       qtyIndex = findColumnIndex(headers, [/\bmikt\b/, /\bmiktar\b/, /\bmik\b/, /\badet\b/, /\bad\b/, /\bqty\b/, /\bquantity\b/, ...buildInstructionPatterns(instruction, "qty")]);
       xIndex = findColumnIndex(headers, [/\bx yonu\b/, /^x$/, /\ben\b/, /\bgenislik\b/, ...buildInstructionPatterns(instruction, "x")]);
       yIndex = findColumnIndex(headers, [/\by yonu\b/, /^y$/, /\bick ap\b/, /\bic cap\b/, /\bkalinlik\b/, ...buildInstructionPatterns(instruction, "y")]);
       zIndex = findColumnIndex(headers, [/\bz yonu\b/, /^z$/, /\bboy\b/, /\buzunluk\b/, ...buildInstructionPatterns(instruction, "z")]);
       materialIndex = findColumnIndex(headers, [/\bmalzeme\b/, /\bseri\b/, /\balasim\b/, ...buildInstructionPatterns(instruction, "material")]);
+      alloyIndex = findColumnIndex(headers, [/\balasim\b/, /\balloy\b/, /\bseri\b/]);
+      temperIndex = findColumnIndex(headers, [/\btamper\b/, /\btemper\b/, /\bsertlik\b/]);
       partIndex = findColumnIndex(headers, [/\bparca numarasi\b/, /\bkod\b/, /\bref\b/, ...buildInstructionPatterns(instruction, "part")]);
       descIndex = findColumnIndex(headers, [/\baciklama\b/, /\bnot\b/, /\btanim\b/, ...buildInstructionPatterns(instruction, "desc")]);
+      kgIndex = findColumnIndex(headers, [/\bkg\b/, /\bagirlik\b/, /\bnet kg\b/, /\bbrut kg\b/]);
+      unitPriceIndex = findColumnIndex(headers, [/\bbirim fiyat\b/, /\bfiyat\b/, /\bunit price\b/, /\bprice\b/]);
+      scrapIndex = findColumnIndex(headers, [/\btalas\b/, /\bfire\b/, /\bscrap\b/]);
+      customerNoIndex = findColumnIndex(headers, [/\bmusteri no\b/, /\bcari no\b/, /\bcustomer no\b/, /\bcustomer code\b/]);
+      customerPartNoIndex = findColumnIndex(headers, [/\bmusteri parca\b/, /\bcustomer part\b/, /\bpart no\b/]);
+      cuttingIndex = findColumnIndex(headers, [/\bkesim\b/, /\bcutting\b/]);
+      originIndex = findColumnIndex(headers, [/\bmensei\b/, /\borigin\b/, /\byerli ithal\b/]);
+    }
+
+    materialIndex = preferDetectedIndex(materialIndex, findColumnIndex(headers, [/\bmalzeme\b/, /\bmalzeme cinsi\b/, /\bmaterial\b/]));
+    alloyIndex = preferDetectedIndex(alloyIndex, findColumnIndex(headers, [/\balasim\b/, /\balloy\b/, /\bseri\b/]));
+    temperIndex = preferDetectedIndex(temperIndex, findColumnIndex(headers, [/\btamper\b/, /\btemper\b/, /\bsertlik\b/]));
+    partIndex = preferDetectedIndex(partIndex, findColumnIndex(headers, [/\bparca numarasi\b/, /\bparca no\b/, /\bpart no\b/, /\bref\b/]));
+    kgIndex = preferDetectedIndex(kgIndex, findColumnIndex(headers, [/\bkg\b/, /\bagirlik\b/, /\bnet kg\b/, /\bbrut kg\b/]));
+    unitPriceIndex = preferDetectedIndex(unitPriceIndex, findColumnIndex(headers, [/\bbirim fiyat\b/, /\bfiyat\b/, /\bunit price\b/, /\bprice\b/]));
+    scrapIndex = preferDetectedIndex(scrapIndex, findColumnIndex(headers, [/\btalas\b/, /\bfire\b/, /\bscrap\b/]));
+    customerNoIndex = preferDetectedIndex(customerNoIndex, findColumnIndex(headers, [/\bmusteri no\b/, /\bcari no\b/, /\bcustomer no\b/, /\bcustomer code\b/]));
+    cuttingIndex = preferDetectedIndex(cuttingIndex, findColumnIndex(headers, [/\bkesim\b/, /\bcutting\b/]));
+    originIndex = preferDetectedIndex(originIndex, findColumnIndex(headers, [/\bmensei\b/, /\borigin\b/, /\byerli ithal\b/]));
+
+    const detectedCustomerPartNoIndex = findColumnIndex(headers, [/\bmusteri parca\b/, /\bcustomer part\b/, /\bcust part\b/]);
+    customerPartNoIndex = preferDetectedIndex(customerPartNoIndex, detectedCustomerPartNoIndex);
+    if (customerNoIndex === detectedCustomerPartNoIndex && detectedCustomerPartNoIndex >= 0) {
+      customerNoIndex = findColumnIndex(headers, [/\bmusteri no\b/, /\bcari no\b/, /\bcustomer no\b/, /\bcustomer code\b/]);
+    }
+    const detectedQtyIndex = findQuantityIndex(headers, rows.slice(1) as unknown[][]);
+    if (detectedQtyIndex >= 0) {
+      qtyIndex = detectedQtyIndex;
     }
 
     const usableDimIndexes = [xIndex, yIndex, zIndex].filter((index) => index >= 0);
-    if (usableDimIndexes.length < 2) continue;
+    const dimensionTextIndex = findDimensionTextIndex(headers, rows.slice(1) as unknown[][]);
 
     for (const row of rows.slice(1)) {
-      const dims = usableDimIndexes
-        .map((index) => toCellNumber(row[index]))
-        .filter((value): value is number => value !== null);
+      const dims = readRowDimensions(row, usableDimIndexes, dimensionTextIndex);
       if (dims.length < 2) continue;
 
       const sortedDims = [...dims].sort((a, b) => a - b);
       const qty = qtyIndex >= 0 ? toCellNumber(row[qtyIndex]) : null;
       const material = materialIndex >= 0 ? String(row[materialIndex] ?? "").trim() : "";
-      const seriesMatch = material.match(/\b([1-9]\d{3})\b/);
-      const series = seriesMatch?.[1] ?? null;
+      const rawAlloy = alloyIndex >= 0 ? toCellText(row[alloyIndex]) : null;
+      const alasim = extractSeries(rawAlloy) ?? extractSeries(material);
+      const temper = temperIndex >= 0 ? toCellText(row[temperIndex]) : null;
+      const series = alasim;
       const headerParts = [
         partIndex >= 0 ? String(row[partIndex] ?? "").trim() : "",
+        customerPartNoIndex >= 0 ? String(row[customerPartNoIndex] ?? "").trim() : "",
         material,
+        rawAlloy && rawAlloy !== material ? rawAlloy : "",
+        temper ?? "",
         descIndex >= 0 ? String(row[descIndex] ?? "").trim() : ""
       ].filter(Boolean);
       const headerContext = [headerParts.join(" | "), instruction].filter(Boolean).join(" | ") || sheetName;
       const raw = [
         qty ? `${qty} ADET` : "",
-        xIndex >= 0 ? `X ${row[xIndex] ?? ""}` : "",
-        yIndex >= 0 ? `Y ${row[yIndex] ?? ""}` : "",
-        zIndex >= 0 ? `Z ${row[zIndex] ?? ""}` : "",
+        usableDimIndexes.length >= 2
+          ? [
+              xIndex >= 0 ? `X ${row[xIndex] ?? ""}` : "",
+              yIndex >= 0 ? `Y ${row[yIndex] ?? ""}` : "",
+              zIndex >= 0 ? `Z ${row[zIndex] ?? ""}` : ""
+            ].filter(Boolean).join(" ")
+          : `ÖLÇÜ ${dims.join("x")}`,
         material
       ].filter(Boolean).join(" ");
 
@@ -337,6 +531,15 @@ async function buildExcelDocument(workbook: XLSX.WorkBook, instruction?: string 
         dim3: sortedDims[2] ?? null,
         qty,
         series,
+        alasim,
+        temper,
+        kg: kgIndex >= 0 ? toCellNumber(row[kgIndex]) : null,
+        birimFiyat: unitPriceIndex >= 0 ? toCellNumber(row[unitPriceIndex]) : null,
+        talasMik: scrapIndex >= 0 ? toCellNumber(row[scrapIndex]) : null,
+        musteriNo: customerNoIndex >= 0 ? toCellText(row[customerNoIndex]) : null,
+        musteriParcaNo: customerPartNoIndex >= 0 ? toCellText(row[customerPartNoIndex]) : null,
+        kesimDurumu: cuttingIndex >= 0 ? normalizeCuttingValue(row[cuttingIndex]) : null,
+        mensei: originIndex >= 0 ? normalizeOriginValue(row[originIndex]) : null,
         header_context: headerContext || null,
         confidence: qty !== null ? 0.96 : 0.88
       });

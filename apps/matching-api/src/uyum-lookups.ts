@@ -251,6 +251,38 @@ limit ${normalizedLimit}`;
         }
       };
     }
+  },
+  "special-codes": {
+    buildSql: ({ query, limit }) => {
+      const normalizedQuery = normalizeLookupQuery(query);
+      const normalizedLimit = normalizeLookupLimit(limit, 30, 100);
+      const filters: string[] = [];
+      if (normalizedQuery) {
+        const pattern = toSqlPattern(normalizedQuery);
+        filters.push(`(cat.cat_code ilike '${pattern}' or coalesce(cat.description, '') ilike '${pattern}')`);
+      }
+      const whereSql = filters.length > 0 ? `where ${filters.join(" and ")}` : "";
+      return `select
+cat.CAT_CODE,
+cat.DESCRIPTION
+from GNLD_CATEGORY cat
+${whereSql}
+order by cat.CAT_CODE
+limit ${normalizedLimit}`;
+    },
+    mapRow: (row) => {
+      const code = readStringField(row, ["cat_code", "CAT_CODE"]);
+      const description = readStringField(row, ["description", "DESCRIPTION"]);
+      if (!code) return null;
+      return {
+        value: code,
+        label: [code, description].filter(Boolean).join(" "),
+        payload: {
+          code,
+          description
+        }
+      };
+    }
   }
 };
 

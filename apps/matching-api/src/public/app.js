@@ -55,6 +55,7 @@ const offerMetaRepresentativeEl = el("offerMetaRepresentative");
 const offerMetaWarehouseEl = el("offerMetaWarehouse");
 const offerMetaPaymentPlanEl = el("offerMetaPaymentPlan");
 const offerMetaIncotermEl = el("offerMetaIncoterm");
+const offerMetaSpecialCodeEl = el("offerMetaSpecialCode");
 const offerMetaDeliveryDateEl = el("offerMetaDeliveryDate");
 const offerMetaDescriptionEl = el("offerMetaDescription");
 const refreshRulesBtnEl = el("refreshRulesBtn");
@@ -107,6 +108,7 @@ function isClearInstructionStateCommand(message) {
   const normalized = String(message || "")
     .toLocaleLowerCase("tr-TR")
     .normalize("NFD")
+    .replace(/ı/g, "i")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/ı/g, "i")
     .trim();
@@ -133,10 +135,26 @@ function describeActiveMatchPolicy(policy) {
   return parts.join(" | ");
 }
 
+function parseInstructionRowTargets(message) {
+  const normalized = normalizeInstructionText(message);
+  const matches = [
+    ...normalized.matchAll(/(\d+)\s*\.\s*sat(?:ir|ır)[a-z]*/g),
+    ...normalized.matchAll(/(\d+)\s+sat(?:ir|ır)(?:i|a|e|da|de|daki|deki|icin)\b/g)
+  ];
+  return [...new Set(matches
+    .map((match) => Number(match[1]) - 1)
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < rows.length))];
+}
+
 function parseInstructionTargetScope(message) {
+  if (parseInstructionRowTargets(message).length > 0) {
+    return null;
+  }
+
   const normalized = String(message || "")
     .toLocaleLowerCase("tr-TR")
     .normalize("NFD")
+    .replace(/ı/g, "i")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/ı/g, "i")
     .trim();
@@ -145,7 +163,21 @@ function parseInstructionTargetScope(message) {
   const tamperEmpty = /\btamperi?\s+bos\s+olan/i.test(normalized) || /\btemperi?\s+bos\s+olan/i.test(normalized);
   const tamperMatch = normalized.match(/\btamperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\s+olan/i)
     || normalized.match(/\btemperi?\s+(t\d{1,4}|h\d{1,4}|o|f)\s+olan/i);
-  const alasimMatch = normalized.match(/\balasimi?\s+([1-9]\d{3})\s+olan/i) || normalized.match(/\b([1-9]\d{3})\s+olan/i);
+  const alasimMatch = normalized.match(/\balasimi?\s+([1-9]\d{3})\s+olan/i)
+    || normalized.match(/\bserisi?\s+([1-9]\d{3})\s+olan/i)
+    || normalized.match(/\b([1-9]\d{3})\s+olan/i);
+  const dim1Match = normalized.match(/\bkalinlik\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s+olan/i);
+  const dim2Match = normalized.match(/\ben\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s+olan/i);
+  const dim3Match = normalized.match(/\bboy\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s+olan/i);
+  const quantityMatch = normalized.match(/\b(?:adet|miktar)\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s+olan/i);
+  const kgMatch = normalized.match(/\bkg\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s+olan/i);
+  const unitPriceMatch = normalized.match(/\b(?:birim\s*fiyat|fiyat)\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s+olan/i);
+  const scrapMatch = normalized.match(/\b(?:talas|talas\s*mik)\s*(?:=|:)?\s*(\d+(?:[.,]\d+)?)\s+olan/i);
+  const customerNoMatch = normalized.match(/\bmusteri\s*no\s*(?:=|:)?\s*([a-z0-9._-]+)\s+olan/i);
+  const customerPartNoMatch = normalized.match(/\bmusteri\s*parca\s*no\s*(?:=|:)?\s*([a-z0-9._-]+)\s+olan/i);
+  const unitMatch = normalized.match(/\bbirim\s*(?:=|:)?\s*([a-z0-9._-]+)\s+olan/i);
+  const originMatch = normalized.match(/\bmensei\s*(?:=|:)?\s*(yerli|ithal)\s+olan/i);
+  const cutMatch = normalized.match(/\bkesim\s*(var|yok)\s+olan/i);
   const stockCodeMatch = normalized.match(/\bstok\s*kodunda\s+([a-z0-9._-]{2,30})\s+(?:gecen|geçen|gecsin|geçsin|olsun)\s+olan/i);
   const stockNameMatch = normalized.match(/\bstok\s*adinda\s+(.+?)\s+(?:gecen|geçen|gecsin|geçsin|olsun)\s+olan/i)
     || normalized.match(/\bstok\s*adinda\s+(.+?)\s+olan/i);
@@ -159,6 +191,18 @@ function parseInstructionTargetScope(message) {
   if (tamperEmpty) target.tamperEmpty = true;
   if (tamperMatch) target.tamper = tamperMatch[1].toUpperCase();
   if (alasimMatch) target.alasim = alasimMatch[1];
+  if (dim1Match) target.dimKalinlik = Number(dim1Match[1].replace(",", "."));
+  if (dim2Match) target.dimEn = Number(dim2Match[1].replace(",", "."));
+  if (dim3Match) target.dimBoy = Number(dim3Match[1].replace(",", "."));
+  if (quantityMatch) target.quantity = Number(quantityMatch[1].replace(",", "."));
+  if (kgMatch) target.kg = Number(kgMatch[1].replace(",", "."));
+  if (unitPriceMatch) target.birimFiyat = Number(unitPriceMatch[1].replace(",", "."));
+  if (scrapMatch) target.talasMik = Number(scrapMatch[1].replace(",", "."));
+  if (customerNoMatch) target.musteriNo = customerNoMatch[1].toLocaleLowerCase("tr-TR");
+  if (customerPartNoMatch) target.musteriParcaNo = customerPartNoMatch[1].toLocaleLowerCase("tr-TR");
+  if (unitMatch) target.birim = unitMatch[1].toLocaleLowerCase("tr-TR");
+  if (originMatch) target.mensei = originMatch[1] === "yerli" ? "yerli" : "ithal";
+  if (cutMatch) target.kesimDurumu = cutMatch[1] === "var" ? "var" : "yok";
   if (stockCodeMatch) target.stockCodeTerm = stockCodeMatch[1].toUpperCase();
   if (stockNameMatch) target.stockNameTerm = stockNameMatch[1].trim().toLocaleLowerCase("tr-TR");
 
@@ -169,13 +213,31 @@ function rowMatchesTargetScope(row, target) {
   if (!target) return true;
   const selected = selectedCandidate(row);
   const tamper = String(row.tamper ?? selected?.tamper ?? "").trim().toUpperCase();
-  const alasim = String(row.alasim ?? selected?.alasim ?? "").trim();
+  const alasim = String(selected?.alasim ?? row.alasim ?? "").trim();
   const stockCode = String(selected?.stock_code ?? "").toUpperCase();
   const stockName = String(selected?.stock_name ?? "").toLocaleLowerCase("tr-TR");
+  const birim = String(selected?.birim ?? "").toLocaleLowerCase("tr-TR");
+  const nearlyEqual = (left, right) => {
+    const a = Number(left);
+    const b = Number(right);
+    return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 0.001;
+  };
 
   if (target.tamperEmpty && tamper) return false;
   if (target.tamper && tamper !== target.tamper) return false;
   if (target.alasim && alasim !== target.alasim) return false;
+  if (target.dimKalinlik != null && !nearlyEqual(row.dimKalinlik, target.dimKalinlik)) return false;
+  if (target.dimEn != null && !nearlyEqual(row.dimEn, target.dimEn)) return false;
+  if (target.dimBoy != null && !nearlyEqual(row.dimBoy, target.dimBoy)) return false;
+  if (target.quantity != null && !nearlyEqual(row.quantity ?? row.offer_adet, target.quantity)) return false;
+  if (target.kg != null && !nearlyEqual(row.kg, target.kg)) return false;
+  if (target.birimFiyat != null && !nearlyEqual(row.birimFiyat, target.birimFiyat)) return false;
+  if (target.talasMik != null && !nearlyEqual(row.talasMik, target.talasMik)) return false;
+  if (target.musteriNo && !String(row.musteriNo ?? "").toLocaleLowerCase("tr-TR").includes(target.musteriNo)) return false;
+  if (target.musteriParcaNo && !String(row.musteriParcaNo ?? "").toLocaleLowerCase("tr-TR").includes(target.musteriParcaNo)) return false;
+  if (target.birim && birim !== target.birim) return false;
+  if (target.mensei && String(row.mensei ?? "").toLocaleLowerCase("tr-TR") !== target.mensei) return false;
+  if (target.kesimDurumu && !String(row.kesimDurumu ?? "").toLocaleLowerCase("tr-TR").includes(target.kesimDurumu)) return false;
   if (target.stockCodeTerm && !stockCode.includes(target.stockCodeTerm)) return false;
   if (target.stockNameTerm && !stockName.includes(target.stockNameTerm)) return false;
   return true;
@@ -469,6 +531,7 @@ function setMatchedOfferLocked(next) {
     offerMetaWarehouseEl,
     offerMetaPaymentPlanEl,
     offerMetaIncotermEl,
+    offerMetaSpecialCodeEl,
     offerMetaDeliveryDateEl,
     offerMetaDescriptionEl
   ].forEach((control) => {
@@ -760,6 +823,12 @@ function initializeOfferMetaPanel() {
     minChars: 0,
     limit: 30
   });
+  setupLookupPicker(offerMetaSpecialCodeEl, {
+    lookupKey: "special-codes",
+    placeholder: "Ozel kod veya aciklama yazarak ara...",
+    minChars: 0,
+    limit: 30
+  });
 
   if (offerMetaDateEl && !offerMetaDateEl.value) {
     offerMetaDateEl.value = new Date().toISOString().slice(0, 10);
@@ -800,6 +869,7 @@ function normalizeInstructionText(value) {
   return String(value || "")
     .toLocaleLowerCase("tr-TR")
     .normalize("NFD")
+    .replace(/ı/g, "i")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/ı/g, "i")
     .trim();
@@ -999,6 +1069,20 @@ function mergeRowDefaults(nextDefaults) {
   };
 }
 
+function buildMatchFiltersForRow(row, policyOverride = null) {
+  const policy = policyOverride || currentMatchPolicy();
+  const filters = {};
+  if (policy?.preferredSeries) {
+    filters.series = policy.preferredSeries;
+  } else if (row?.series) {
+    filters.series = row.series;
+  }
+  if (policy?.preferredProductType) {
+    filters.product_type = policy.preferredProductType;
+  }
+  return Object.keys(filters).length > 0 ? filters : undefined;
+}
+
 async function rerunMatchingByInstruction(message, options = {}) {
   if (isClearInstructionStateCommand(message)) {
     resetInstructionState();
@@ -1012,11 +1096,16 @@ async function rerunMatchingByInstruction(message, options = {}) {
     sourceMode
   });
   const plan = response.plan || {};
+  const rowTargetIndexes = parseInstructionRowTargets(message);
+  const scopedMatchPolicy = rowTargetIndexes.length > 0 && plan.matchPolicy ? plan.matchPolicy : null;
+  const scopedMatchInstruction = scopedMatchPolicy ? (plan.sanitizedMessage || message) : "";
   const targetScope = parseInstructionTargetScope(message);
-  const targetIndexes = targetScope
+  const targetIndexes = rowTargetIndexes.length > 0
+    ? rowTargetIndexes
+    : targetScope && !plan.matchPolicy
     ? rows.map((row, index) => (rowMatchesTargetScope(row, targetScope) ? index : -1)).filter((index) => index >= 0)
     : [];
-  if (targetScope && targetIndexes.length === 0) {
+  if (targetScope && targetIndexes.length === 0 && !plan.matchPolicy && !plan.extractionPrompt && !isWholeTableRerunInstruction(message)) {
     appendInstructionMessage("assistant", "Bu talimata uyan bir satır bulunamadı. Bu yüzden tüm satırlar yeniden aranmadı.");
     return;
   }
@@ -1040,7 +1129,10 @@ async function rerunMatchingByInstruction(message, options = {}) {
   if (plan.extractionPrompt && matchInstructionTextEl) {
     matchInstructionTextEl.value = plan.extractionPrompt;
   }
-  if (plan.matchPolicy) {
+  if (plan.matchPolicy && !scopedMatchPolicy) {
+    if (matchInstructionTextEl) {
+      matchInstructionTextEl.value = plan.sanitizedMessage || message;
+    }
     mergeMatchPolicy(plan.matchPolicy);
   }
   if (plan.rowDefaults) {
@@ -1089,6 +1181,10 @@ async function rerunMatchingByInstruction(message, options = {}) {
       const findMatchingItem = (r, itms) => {
         return itms.find(itm => itm.dim_text === r.dim_text || (r.header_context && itm.header_context === r.header_context));
       };
+
+      if (targetScope && targetIndexes.length === 0 && plan.matchPolicy) {
+        appendInstructionMessage("assistant", "Tabloda bu hedef alan degeri bulunamadi; talimat arama filtresi olarak tum satirlara uygulanacak.");
+      }
       
       if (targetIndexes.length > 0 && extractedDoc?.items?.length > 0) {
         const items = extractedDoc.items;
@@ -1097,12 +1193,12 @@ async function rerunMatchingByInstruction(message, options = {}) {
           const item = items[rowIndex] ?? findMatchingItem(rows[rowIndex], items);
           if (!item) continue;
           setAnalysisModal(true, `${position + 1}/${targetIndexes.length} hedef satır yeniden aranıyor...`);
-          const filters = item.series ? { series: item.series } : undefined;
+          const filters = buildMatchFiltersForRow({ ...rows[rowIndex], series: item.series ?? rows[rowIndex].series }, scopedMatchPolicy);
           const res = await api("/match", "POST", {
             text: item.query,
             topK: candidateCount(),
-            matchInstruction: currentMatchInstruction() || undefined,
-            matchPolicy: currentMatchPolicy() || undefined,
+            matchInstruction: scopedMatchInstruction || currentMatchInstruction() || undefined,
+            matchPolicy: scopedMatchPolicy || currentMatchPolicy() || undefined,
             filters
           });
           const candidates = res.results || [];
@@ -1139,7 +1235,7 @@ async function rerunMatchingByInstruction(message, options = {}) {
       renderTable();
     }
 
-    pendingChatLearning = plan.learnable ? {
+    pendingChatLearning = plan.learnable && !scopedMatchPolicy ? {
       rawMessage: message,
       plan,
       createdAt: Date.now(),
@@ -1230,7 +1326,12 @@ async function api(path, method, body) {
   } catch {
     data = { raw: txt };
   }
-  if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.message || data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
@@ -1495,6 +1596,106 @@ function toDecimalOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function roundWeight(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Number(n.toFixed(4));
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function evaluateStockFormula(formula, variables) {
+  const raw = String(formula ?? "").trim();
+  if (!raw) return null;
+
+  const aliases = {
+    CAP: variables.cap,
+    "ÇAP": variables.cap,
+    EN: variables.en,
+    BOY: variables.boy,
+    YUKSEKLIK: variables.yukseklik,
+    "YÜKSEKLİK": variables.yukseklik,
+    "ÖZGÜLAĞIRLIK": variables.specificGravity,
+    OZGULAGIRLIK: variables.specificGravity,
+    OZAGIRLIK: variables.specificGravity
+  };
+
+  const expression = raw.replace(/\[([^\]]+)\]/g, (_match, token) => {
+    const normalized = String(token || "")
+      .trim()
+      .toLocaleUpperCase("tr-TR")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+    const exact = String(token || "").trim().toLocaleUpperCase("tr-TR");
+    const value = aliases[exact] ?? aliases[normalized];
+    const n = Number(value);
+    return Number.isFinite(n) ? String(n) : "0";
+  });
+
+  if (!/^[0-9+\-*/().,\s]+$/.test(expression)) return null;
+  try {
+    const normalizedExpression = expression.replace(/,/g, ".");
+    const result = Function(`"use strict"; return (${normalizedExpression});`)();
+    const n = Number(result);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function calculateRowWeights(row) {
+  const selected = selectedCandidate(row);
+  const cap = firstFiniteNumber(row.dimKalinlik, selected?.erp_cap);
+  const en = firstFiniteNumber(row.dimEn, selected?.erp_en);
+  const boy = firstFiniteNumber(row.dimBoy, selected?.erp_boy);
+  const yukseklik = firstFiniteNumber(selected?.erp_yukseklik);
+  const specificGravity = firstFiniteNumber(selected?.specific_gravity);
+  const quantity = firstFiniteNumber(row.quantity) ?? 1;
+
+  if (!cap || !en || !boy || !specificGravity || !selected?.weight_formula) {
+    return null;
+  }
+
+  const variables = { cap, en, boy, yukseklik, specificGravity };
+  const unitKg = evaluateStockFormula(selected.weight_formula, variables);
+  if (unitKg === null) return null;
+
+  const unitTalas = row.kesimDurumu === "Kesim Yok"
+    ? 0
+    : evaluateStockFormula(selected.scrap_formula, variables) ?? 0;
+  const baseKg = unitKg * quantity;
+  const talasMik = unitTalas * quantity;
+
+  return {
+    kg: roundWeight(baseKg + talasMik),
+    talasMik: roundWeight(talasMik)
+  };
+}
+
+function recalculateRowWeights(index) {
+  const row = rows[index];
+  if (!row) return;
+  const calculated = calculateRowWeights(row);
+  if (!calculated) return;
+  row.kg = calculated.kg;
+  row.talasMik = calculated.talasMik;
+}
+
+function refreshWeightInputs(index) {
+  const row = rows[index];
+  if (!row) return;
+  const kgInput = resultBodyEl?.querySelector(`[data-k='kg'][data-i='${index}']`);
+  const talasInput = resultBodyEl?.querySelector(`[data-k='talas-mik'][data-i='${index}']`);
+  if (kgInput) kgInput.value = dimensionInput(row.kg);
+  if (talasInput) talasInput.value = dimensionInput(row.talasMik);
+}
+
 function displayDim(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   const n = Number(value);
@@ -1547,6 +1748,7 @@ function syncRowStockAttributes(index, candidate) {
   if (!rows[index]) return;
   rows[index].alasim = candidate?.alasim ?? null;
   rows[index].tamper = candidate?.tamper ?? null;
+  recalculateRowWeights(index);
 }
 
 function ensureResultTableStructure() {
@@ -1681,7 +1883,9 @@ function stockSearchText(stock) {
     stock.erp_boy,
     stock.erp_yukseklik,
     stock.erp_cap,
-    stock.specific_gravity
+    stock.specific_gravity,
+    stock.weight_formula,
+    stock.scrap_formula
   ].filter(Boolean).join(" ").toLocaleLowerCase("tr-TR");
 }
 
@@ -1795,6 +1999,8 @@ function bindRowInputs() {
       e.target.value = decimalInput(e.target.value || "");
       rows[index].dimKalinlik = toDecimalOrNull(e.target.value);
       rows[index].offer_kalinlikCap = rows[index].dimKalinlik;
+      recalculateRowWeights(index);
+      refreshWeightInputs(index);
     });
   });
 
@@ -1804,6 +2010,8 @@ function bindRowInputs() {
       e.target.value = decimalInput(e.target.value || "");
       rows[index].dimEn = toDecimalOrNull(e.target.value);
       rows[index].offer_enEtKal = rows[index].dimEn;
+      recalculateRowWeights(index);
+      refreshWeightInputs(index);
     });
   });
 
@@ -1813,6 +2021,8 @@ function bindRowInputs() {
       e.target.value = decimalInput(e.target.value || "");
       rows[index].dimBoy = toDecimalOrNull(e.target.value);
       rows[index].offer_boy = rows[index].dimBoy;
+      recalculateRowWeights(index);
+      refreshWeightInputs(index);
     });
   });
 
@@ -1820,6 +2030,8 @@ function bindRowInputs() {
     select.addEventListener("change", (e) => {
       const index = Number(e.target.dataset.i);
       rows[index].kesimDurumu = e.target.value || "Kesim Var";
+      recalculateRowWeights(index);
+      refreshWeightInputs(index);
     });
   });
 
@@ -1836,6 +2048,8 @@ function bindRowInputs() {
       rows[index].quantity = Number(numericInput(e.target.value || "")) || null;
       rows[index].offer_adet = rows[index].quantity || rows[index].offer_adet || null;
       e.target.value = numericInput(e.target.value || "");
+      recalculateRowWeights(index);
+      refreshWeightInputs(index);
     });
   });
 
@@ -1887,13 +2101,14 @@ function renderTable() {
   }
 
   resultBodyEl.innerHTML = rows.map((row, index) => {
+    recalculateRowWeights(index);
     const selected = selectedCandidate(row);
     const candidates = Array.isArray(row.candidates) ? row.candidates : [];
     const [defaultKalinlik, defaultEn, defaultBoy] = parseDimParts(row.dim_text);
     const kalinlik = row.dimKalinlik ?? defaultKalinlik;
     const en = row.dimEn ?? defaultEn;
     const boy = row.dimBoy ?? defaultBoy;
-    const alasim = row.alasim ?? selected?.alasim ?? "-";
+    const alasim = selected?.alasim ?? row.alasim ?? "-";
     const tamper = row.tamper ?? selected?.tamper ?? "-";
     const kesim = row.kesimDurumu || "Kesim Var";
     const mensei = row.mensei || "İTHAL";
@@ -2043,6 +2258,15 @@ function buildDocFromExistingRows() {
       dim3: row.dimBoy ?? null,
       qty: row.quantity ?? null,
       series: row.series ?? null,
+      alasim: row.alasim ?? null,
+      temper: row.tamper ?? null,
+      kg: row.kg ?? null,
+      birimFiyat: row.birimFiyat ?? null,
+      talasMik: row.talasMik ?? null,
+      musteriNo: row.musteriNo ?? "",
+      musteriParcaNo: row.musteriParcaNo ?? "",
+      kesimDurumu: row.kesimDurumu ?? null,
+      mensei: row.mensei ?? null,
       header_context: row.header_context ?? null,
       confidence: 0.9
     };
@@ -2083,7 +2307,7 @@ async function rematchExistingRows(options = {}) {
 
       if (!queryText) return;
 
-      const filters = row.series ? { series: row.series } : undefined;
+      const filters = buildMatchFiltersForRow(row);
       const res = await api("/match", "POST", {
         text: queryText,
         topK: candidateCount(),
@@ -2134,7 +2358,7 @@ async function runAnalysis(doc, options = {}) {
       total: doc.items.length,
       item
     });
-    const filters = item.series ? { series: item.series } : undefined;
+    const filters = buildMatchFiltersForRow({ series: item.series });
     const res = await api("/match", "POST", {
       text: item.query,
       topK: candidateCount(),
@@ -2156,15 +2380,16 @@ async function runAnalysis(doc, options = {}) {
       dimKalinlik: defaultKalinlik,
       dimEn: defaultEn,
       dimBoy: defaultBoy,
-      alasim: candidates[0]?.alasim ?? null,
-      tamper: candidates[0]?.tamper ?? null,
-      kesimDurumu: "Kesim Var",
+      alasim: candidates[0]?.alasim ?? item.alasim ?? null,
+      tamper: item.temper ?? candidates[0]?.tamper ?? null,
+      kesimDurumu: item.kesimDurumu || "Kesim Var",
+      mensei: item.mensei || "İTHAL",
       quantity: item.qty,
-      kg: null,
-      birimFiyat: null,
-      talasMik: null,
-      musteriNo: "",
-      musteriParcaNo: "",
+      kg: item.kg ?? null,
+      birimFiyat: item.birimFiyat ?? null,
+      talasMik: item.talasMik ?? null,
+      musteriNo: item.musteriNo ?? "",
+      musteriParcaNo: item.musteriParcaNo ?? "",
       series: item.series,
       header_context: item.header_context,
       user_note: item.qty ? `adet:${item.qty}` : ""
@@ -2231,7 +2456,7 @@ function collectMatchedTableExportRows() {
       kalinlik: row.dimKalinlik ?? null,
       en: row.dimEn ?? null,
       boy: row.dimBoy ?? null,
-      alasim: row.alasim ?? selected?.alasim ?? "",
+      alasim: selected?.alasim ?? row.alasim ?? "",
       tamper: row.tamper ?? selected?.tamper ?? "",
       stokKodu: selected?.stock_code ?? "",
       stokAdi: selected?.stock_name ?? "",
@@ -2276,6 +2501,7 @@ function collectMatchedOfferMeta() {
     paymentPlanCode: offerMetaPaymentPlanEl?.value?.trim() || "",
     incotermName: incotermLabel,
     transportTypeCode,
+    specialCode: offerMetaSpecialCodeEl?.value?.trim() || "",
     deliveryDate: offerMetaDeliveryDateEl?.value?.trim() || "",
     description: offerMetaDescriptionEl?.value?.trim() || ""
   };
@@ -2334,6 +2560,14 @@ function applyMatchedOfferMeta(meta = {}) {
       offerMetaIncotermEl._lookupInput.value = incotermLabel;
     }
     offerMetaIncotermEl.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (offerMetaSpecialCodeEl) {
+    fillSelectOptions(offerMetaSpecialCodeEl, meta.specialCode ? [{ value: meta.specialCode, label: meta.specialCode }] : []);
+    offerMetaSpecialCodeEl.value = meta.specialCode || "";
+    if (offerMetaSpecialCodeEl._lookupInput) {
+      offerMetaSpecialCodeEl._lookupInput.value = meta.specialCode || "";
+    }
+    offerMetaSpecialCodeEl.dispatchEvent(new Event("change", { bubbles: true }));
   }
   if (offerMetaDeliveryDateEl) {
     offerMetaDeliveryDateEl.value = meta.deliveryDate || "";
@@ -2624,6 +2858,13 @@ function applyModalSelection() {
       stock_code: stock.stock_code,
       stock_name: stock.stock_name,
       birim: stock.birim ?? null,
+      erp_cap: stock.erp_cap ?? null,
+      erp_en: stock.erp_en ?? null,
+      erp_boy: stock.erp_boy ?? null,
+      erp_yukseklik: stock.erp_yukseklik ?? null,
+      specific_gravity: stock.specific_gravity ?? null,
+      weight_formula: stock.weight_formula ?? null,
+      scrap_formula: stock.scrap_formula ?? null,
       alasim: stock.alasim ?? null,
       tamper: stock.tamper ?? null,
       score: rows[modalRowIndex].selected_score ?? 0
@@ -2758,11 +2999,34 @@ sendMatchedOfferToErpBtnEl?.addEventListener("click", async () => {
 
     const offerMeta = validateMatchedOfferMeta();
     const offerId = Number(currentMatchedOfferId);
-    const result = await api("/matched-offers/send-erp", "POST", {
+    const payload = {
       offerId,
       ...offerMeta,
       rows: mapRowsForOfferSave()
-    });
+    };
+
+    let result;
+    try {
+      result = await api("/matched-offers/send-erp", "POST", payload);
+    } catch (err) {
+      if (err.status !== 409 || !err.data?.confirmationRequired) {
+        throw err;
+      }
+
+      setAnalysisModal(false);
+      const confirmed = confirm(`${err.data.warningMessage || err.message}\n\nDevam etmek istiyor musunuz?`);
+      if (!confirmed) {
+        saveStatusEl.textContent = "ERP gonderimi iptal edildi.";
+        return;
+      }
+
+      setAnalysisModal(true, "Teklif ERP sistemine gonderiliyor...", "ERP'ye Gonderiliyor...");
+      await flushStatusPaint();
+      result = await api("/matched-offers/send-erp", "POST", {
+        ...payload,
+        continueOnUyumWarning: true
+      });
+    }
 
     saveStatusEl.textContent = `ERP gönderimi tamamlandı. Teklif kaydı: #${offerId}. Uyum mesajı: ${result.uyumResponse?.message ?? "İşlem başarılı"}`;
   } catch (err) {

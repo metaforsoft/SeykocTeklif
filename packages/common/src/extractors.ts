@@ -1,4 +1,4 @@
-﻿import { ExtractedFeatures, ExtractedFromInput, StockMasterRow } from "./types";
+import { ExtractedFeatures, ExtractedFromInput, StockMasterRow } from "./types";
 
 const productKeywords: Record<string, string[]> = {
   BORU: ["boru", "tube", "pipe"],
@@ -28,6 +28,28 @@ function detectSeries(text: string): string | null {
   const matches = [...text.matchAll(SERIES_REGEX)];
   if (matches.length === 0) return null;
   return matches[0][1] ?? null;
+}
+
+/**
+ * Boyut değerlerini (dim1, dim2, dim3) dışlayarak seri tespit eder.
+ * Örnek: "1000x2000 5083" → dim seti {1000, 2000}, seri = 5083
+ * Son bulunan alınır çünkü alaşım genellikle boyutlardan sonra yazılır.
+ */
+function detectSeriesExcludingDims(text: string, dimValues: Set<string>): string | null {
+  const candidates = [...text.matchAll(SERIES_REGEX)]
+    .map((m) => m[1])
+    .filter((token): token is string => Boolean(token) && !dimValues.has(token));
+  return candidates.at(-1) ?? null;
+}
+
+/**
+ * Ham alasim alanından ("5083 H321", "AL5083", "5083-H321") 4 haneli seri sayısını çeker.
+ * Bu fonksiyon SQL normalize'a ek olarak JS tarafında da kullanılır.
+ */
+export function parseSeriesFromRawAlasim(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const m = raw.match(/[1-9][0-9]{3}/);
+  return m ? m[0] : null;
 }
 
 function detectTemper(text: string): string | null {
@@ -122,10 +144,23 @@ export function extractFeaturesFromStock(row: StockMasterRow): ExtractedFeatures
 
 export function extractFeaturesFromInput(rawText: string): ExtractedFromInput {
   const normalized = normalizeText(rawText);
-  const series = detectSeries(normalized);
+
+  // 1. Önce boyutları tespit et
+  const dims = detectDimensions(normalized);
+
+  // 2. Boyutlarda geçen sayıları seri aday listesinden çıkar
+  const dimValues = new Set(
+    [dims.dim1, dims.dim2, dims.dim3]
+      .filter((n): n is number => n !== null)
+      .map(String)
+  );
+
+  // 3. Boyutlara karışmayan 4 haneli token'dan seri al
+  const series = detectSeriesExcludingDims(normalized, dimValues);
+
+  // 4. Temper ayrı algılanır (H321, T6 vb.) — alaşımla karıştırılmaz
   const temper = detectTemper(normalized);
   const product_type = detectProductType(normalized);
-  const dims = detectDimensions(normalized);
 
   return {
     normalized_text: normalized,

@@ -43,6 +43,8 @@ export const env = {
       yukseklik: optional("ERP_COL_YUKSEKLIK", "Yükseklik"),
       cap: optional("ERP_COL_CAP", "Çap"),
       specificGravity: optional("ERP_COL_SPECIFIC_GRAVITY", "Özgül Ağırlık"),
+      weightFormula: optional("ERP_COL_WEIGHT_FORMULA", "Ağırlık Formül"),
+      scrapFormula: optional("ERP_COL_SCRAP_FORMULA", "Talaş Formül"),
       cinsi: optional("ERP_COL_CINSI", "Cinsi"),
       alasim: optional("ERP_COL_ALASIM", "Alaşım"),
       tamper: optional("ERP_COL_TAMPER", "Tamper"),

@@ -256,8 +256,7 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
   const inputDims = toInputDims(extracted);
   const inputThickness = inputDims.length > 0 ? [...inputDims].sort((a, b) => a - b)[0] : null;
   const inputSecondaryDims = inputDims.length > 1 ? [...inputDims].sort((a, b) => a - b).slice(1) : [];
-  const preferAlvByThickness = inputThickness !== null && inputThickness <= 8;
-  const exactErpCapExists = hasExactErpCapCandidate(candidates, inputThickness);
+  // ALV bias ve exactErpCapExists artık hard rule engine'de yönetiliyor
 
   const scored = candidates.map((c) => {
     let score = 0;
@@ -326,14 +325,8 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
     const erpSecondaryDims = [normalizedNumeric(c.erp_en), normalizedNumeric(c.erp_boy), normalizedNumeric(c.erp_yukseklik)]
       .filter((value): value is number => value !== null);
 
-    if (exactErpCapExists && inputThickness !== null) {
-      if (erpCapThickness === null || Math.abs(erpCapThickness - inputThickness) > 0.2) {
-        score -= 140;
-        applyDelta(breakdown, "thickness", -140);
-        why.push("exact erp cap candidate exists");
-      }
-    }
-
+    // erp_cap exact match — birincil kalınlık sinyali
+    // Not: erp_cap boş olan adaylar hard rule ile zaten eleniyor (reject_if_missing_dimension)
     const beforeErpCap = score;
     const afterErpCap = applyThicknessSignal({
       score,
@@ -341,7 +334,7 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
       inputThickness,
       candidateThickness: erpCapThickness,
       label: "erp cap thickness",
-      exactBoost: 56,
+      exactBoost: 35,
       nearestUpperBoost: 20,
       upperCloseBoost: 6,
       upperLooseBoost: 0,
@@ -350,12 +343,6 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
     score = afterErpCap.score;
     applyDelta(breakdown, "thickness", score - beforeErpCap);
     why.splice(0, why.length, ...afterErpCap.why);
-
-    if (inputThickness !== null && erpCapThickness === null) {
-      score -= 22;
-      applyDelta(breakdown, "thickness", -22);
-      why.push("missing erp cap");
-    }
 
     const secondaryDimensionScore = scoreSecondaryDimensions(inputSecondaryDims, erpSecondaryDims, {
       strictSecondaryDims: shouldUseSecondaryDims
@@ -366,17 +353,8 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
       why.push(...secondaryDimensionScore.reasons);
     }
 
-    if (preferAlvByThickness) {
-      if (stockPrefix === "ALV") {
-        score += 18;
-        applyDelta(breakdown, "stock_family", 18);
-        why.push("thin stock prefers ALV");
-      } else {
-        score -= 6;
-        applyDelta(breakdown, "stock_family", -6);
-        why.push("thin stock non-ALV");
-      }
-    }
+    // ALV ince stok tercihi artık kural olarak tanımlanacak (kural motoru üzerinden)
+    // Bu blok kaldırıldı: thin stock prefers ALV (+18/-6)
 
     const beforeCode = score;
     const afterCode = applyThicknessSignal({
@@ -449,6 +427,13 @@ export function scoreCandidates(extracted: ExtractedFromInput, candidates: Candi
       stock_code: c.stock_code,
       stock_name: c.stock_name,
       birim: c.birim ?? null,
+      erp_cap: c.erp_cap ?? null,
+      erp_en: c.erp_en ?? null,
+      erp_boy: c.erp_boy ?? null,
+      erp_yukseklik: c.erp_yukseklik ?? null,
+      specific_gravity: c.specific_gravity ?? null,
+      weight_formula: c.weight_formula ?? null,
+      scrap_formula: c.scrap_formula ?? null,
       alasim: c.alasim ?? null,
       tamper: c.tamper ?? null,
       series: c.series ?? null,

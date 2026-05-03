@@ -4,7 +4,7 @@ import { matchPool } from "@smp/db";
 import { ExtractionFingerprint } from "./extraction-learning";
 
 const openAiApiKey = process.env["OPENAI_API_KEY"]?.trim() ?? "";
-const openAiModel = process.env["OPENAI_STRUCTURED_MODEL"]?.trim() || "gpt-4.1-mini";
+const openAiModel = process.env["OPENAI_STRUCTURED_MODEL"]?.trim() || "gpt-4o";
 
 export interface ParsedInstructionPlan {
   rawMessage: string;
@@ -17,6 +17,16 @@ export interface ParsedInstructionPlan {
   needsReextract: boolean;
   needsRematch: boolean;
   learnable: boolean;
+  /** Yeni kural önizlemesi: intent=new_rule ise dolu gelir, UI onay ister */
+  rulePreview?: {
+    ruleType: "hard_filter" | "soft_boost";
+    scopeType: "global" | "customer";
+    scopeValue: string | null;
+    description: string;
+    isLocked: boolean;
+    conditionJson: Record<string, unknown>;
+    effectJson: Record<string, unknown>;
+  } | null;
 }
 
 interface StoredInstructionPolicy {
@@ -32,6 +42,7 @@ function normalizeText(value: string): string {
   return value
     .toLocaleLowerCase("tr-TR")
     .normalize("NFD")
+    .replace(/ı/g, "i")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/ı/g, "i")
     
@@ -148,6 +159,7 @@ export function parseMatchPolicy(instruction: string | undefined | null): MatchP
     /\b([1-9]\d{3})\s+serisinde\b/,
     /\b([1-9]\d{3})\s+serisinde\s+(?:ara|getir|goster)\b/,
     /\b([1-9]\d{3})\s+serisine\b/,
+    /\b(?:alasimi|serisi|seri)\s+([1-9]\d{3})\b/,
     /\b([1-9]\d{3})\s+serisine\s+(?:bak|gore|göre)\b/,
     /\b(?:alasim|alaşim)\s+([1-9]\d{3})\b/,
     /\b([1-9]\d{3})\s+(?:lerde|larda|olanlar|olanlari|olanları)\b/,
@@ -243,11 +255,22 @@ function parseExpectedItemCount(message: string): number | null {
   return Number.isFinite(count) && count > 0 ? count : null;
 }
 
+interface LlmRulePlan {
+  ruleType: "hard_filter" | "soft_boost";
+  scopeType: "global" | "customer";
+  scopeValue: string | null; // cari kodu veya cari adı
+  description: string;
+  condition: Record<string, unknown>;
+  effect: Record<string, unknown>;
+  isLocked: boolean; // true ise chat prompt'u bu kuralı ezemez
+}
+
 interface LlmInstructionResult {
-  intent: "match_filter" | "extraction_hint" | "row_update" | "rerun" | "unknown";
+  intent: "match_filter" | "extraction_hint" | "row_update" | "rerun" | "new_rule" | "unknown";
   matchPolicy: MatchPolicy | null;
   extractionPrompt: string | null;
   rowCommands: RowInstructionCommand[];
+  rule: LlmRulePlan | null;
   needsRematch: boolean;
   needsReextract: boolean;
   explanation: string;
@@ -328,7 +351,29 @@ async function parseInstructionWithLlm(message: string, rowCount: number): Promi
               "- 'yeniden eşleştir' → intent: rerun",
               "- 'tekrar ara' → intent: rerun",
               "",
-              "### 5. unknown — Anlaşılamayan talimatlar",
+              "### 5. new_rule — Admin kural tanımlama",
+              "Kullanıcı yeni bir eşleştirme kuralı tanımlıyor.",
+              "rule alanını doldur:",
+              "- ruleType: 'hard_filter' (stok elenir) veya 'soft_boost' (puan etkisi)",
+              "- scopeType: 'global' (herkese) veya 'customer' (belirli cari için)",
+              "- scopeValue: cari kodu veya cari adı (customer scope ise), aksi null",
+              "- description: Türkçe kural açıklaması",
+              "- isLocked: true ise chat'ten override edilemez (genellikle hard kurallar için true)",
+              "- condition: JSON kural koşulu ({field, op, value} veya {all:[...]} formatında)",
+              "- effect: JSON kural etkisi ({type, value} formatında)",
+              "",
+              "Desteklenen condition field'lar: input.dim1 (kalınlık), input.dim2 (en), input.dim3 (boy), input.series (alaşım), input.temper, candidate.series, candidate.temper, candidate.stock_code",
+              "Desteklenen op'lar: =, !=, >, >=, <, <=, between, exists, starts_with, in, not_in",
+              "Desteklenen hard effect type'lar: require_prefix, reject_prefix, require_exact_series, reject_if_missing_dimension",
+              "Desteklenen soft effect type'lar: add_score (value: sayı), multiply_score",
+              "",
+              "Örnekler:",
+              "- 'kalınlık 0-8 ise ALV ile başlamalı' → hard_filter, global, condition: {all:[{field:'input.dim1',op:'>=',value:0},{field:'input.dim1',op:'<=',value:8}]}, effect: {type:'require_prefix',value:'ALV'}",
+              "- 'alaşım 7075 ise tam eşleşme zorunlu' → hard_filter, global, condition: {field:'input.series',op:'=',value:'7075'}, effect: {type:'require_exact_series'}",
+              "- 'CARİ-001 için 5083 veya 5086 serisine +15 puan' → soft_boost, customer, scopeValue: 'CARİ-001', condition: {any:[{field:'candidate.series',op:'=',value:'5083'},{field:'candidate.series',op:'=',value:'5086'}]}, effect: {type:'add_score',value:15}",
+              "- 'H321 tamper olanları öne al' → soft_boost, global, condition: {field:'candidate.temper',op:'=',value:'H321'}, effect: {type:'add_score',value:12}",
+              "",
+              "### 6. unknown — Anlaşılamayan talimatlar",
               "Talimat yukarıdaki kategorilere uymuyorsa intent: 'unknown' döndür.",
               "",
               "## Genel Kurallar",
@@ -347,14 +392,13 @@ async function parseInstructionWithLlm(message: string, rowCount: number): Promi
           type: "json_schema",
           json_schema: {
             name: "instruction_plan",
-            strict: true,
+            strict: false,
             schema: {
               type: "object",
-              additionalProperties: false,
               properties: {
                 intent: {
                   type: "string",
-                  enum: ["match_filter", "extraction_hint", "row_update", "rerun", "unknown"]
+                  enum: ["match_filter", "extraction_hint", "row_update", "rerun", "new_rule", "unknown"]
                 },
                 explanation: { type: "string" },
                 needsRematch: { type: "boolean" },
@@ -403,9 +447,22 @@ async function parseInstructionWithLlm(message: string, rowCount: number): Promi
                     },
                     required: ["scope", "rowIndex", "rowNumber", "set"]
                   }
+                },
+                rule: {
+                  type: ["object", "null"],
+                  properties: {
+                    ruleType: { type: "string", enum: ["hard_filter", "soft_boost"] },
+                    scopeType: { type: "string", enum: ["global", "customer"] },
+                    scopeValue: { type: ["string", "null"] },
+                    description: { type: "string" },
+                    isLocked: { type: "boolean" },
+                    condition: { type: "object" },
+                    effect: { type: "object" }
+                  },
+                  required: ["ruleType", "scopeType", "scopeValue", "description", "isLocked", "condition", "effect"]
                 }
               },
-              required: ["intent", "explanation", "needsRematch", "needsReextract", "extractionPrompt", "matchPolicy", "rowCommands"]
+              required: ["intent", "explanation", "needsRematch", "needsReextract", "extractionPrompt", "matchPolicy", "rowCommands", "rule"]
             }
           }
         }
@@ -427,6 +484,196 @@ async function parseInstructionWithLlm(message: string, rowCount: number): Promi
   }
 }
 
+/**
+ * Yalnızca kural tanımlama odaklı LLM çağrısı.
+ * /admin/rules/plan endpoint'i bu fonksiyonu kullanır.
+ * Tüm girdiler kural tanımı olarak değerlendirilir.
+ */
+export async function parseRuleDefinitionWithLlm(message: string): Promise<LlmRulePlan | null> {
+  if (!openAiApiKey) return null;
+  if (!message.trim()) return null;
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openAiApiKey}`
+      },
+      body: JSON.stringify({
+        model: openAiModel,
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Sen bir alüminyum/metal stok eşleştirme platformunun kural tanımlama asistanısın.",
+              "Kullanıcı doğal dilde bir kural tanımlıyor. Bu metni JSON kural şemasına çevir.",
+              "HER ZAMAN bir kural üret. Kullanıcının yazdığı metin kesinlikle bir kural tanımıdır.",
+              "",
+              "## Kural Şeması",
+              "",
+              "### ruleType",
+              "- hard_filter: Koşul sağlanmazsa aday stok elenir (zorunlu kural)",
+              "- soft_boost: Koşul sağlanırsa puan eklenir/çıkarılır (tercih kuralı)",
+              "",
+              "### scopeType ve scopeValue",
+              "- global: Tüm eşleştirmelerde geçerli (scopeValue: null)",
+              "- customer: Belirli cari için geçerli (scopeValue: cari kodu veya adı)",
+              "",
+              "### isLocked",
+              "- true: Chat'ten override edilemez (genelde hard kurallar için)",
+              "- false: Chat'te geçici olarak devre dışı bırakılabilir",
+              "",
+              "### condition (JSON koşul)",
+              "Desteklenen alanlar (field):",
+              "- input.dim1: Girdi kalınlık/çap (mm)",
+              "- input.dim2: Girdi en (mm)",
+              "- input.dim3: Girdi boy (mm)",
+              "- input.series: Girdi alaşım serisi (4 hane, ör: 5083)",
+              "- input.temper: Girdi tamper (ör: H321, T6)",
+              "- input.product_type: Girdi ürün tipi (PLAKA, BORU, SAC, vs.)",
+              "- candidate.series: Aday stok alaşım serisi",
+              "- candidate.temper: Aday stok tamper",
+              "- candidate.stock_code: Aday stok kodu",
+              "- candidate.stock_name: Aday stok adı",
+              "- candidate.dim1: Aday kalınlık",
+              "- candidate.dim2: Aday en",
+              "- candidate.dim3: Aday boy",
+              "- candidate.erp_cap: Aday ERP kalınlık",
+              "",
+              "Desteklenen operatörler (op):",
+              "- eq veya =: Eşit",
+              "- neq veya !=: Eşit değil",
+              "- gt veya >: Büyük",
+              "- gte veya >=: Büyük eşit",
+              "- lt veya <: Küçük",
+              "- lte veya <=: Küçük eşit",
+              "- exists: Alan 0'dan farklı / boş değil (value gerekmez)",
+              "- not_exists: Alan 0 veya boş (value gerekmez)",
+              "- starts_with: Belirtilen değerle başlar",
+              "- not_starts_with: Belirtilen değerle başlamaz",
+              "- contains: İçerir",
+              "- in: Listede var (value: dizi)",
+              "- between: Aralıkta (value: [min, max])",
+              "",
+              "Bileşik koşullar:",
+              "- {all: [...]} : Tüm koşullar sağlanmalı (AND)",
+              "- {any: [...]} : Herhangi biri sağlanmalı (OR)",
+              "- {not: {...}} : Ters koşul",
+              "",
+              "### effect (JSON etki)",
+              "Hard filter efektleri:",
+              "- require_prefix: Stok kodu belirtilen önek ile başlamalı (value: önek)",
+              "- reject_prefix: Stok kodu belirtilen önek ile BAŞLAMAMALI (value: önek)",
+              "- require_exact_series: Alaşım serisi tam eşleşmeli",
+              "- reject_if_missing_dimension: Boyut bilgisi eksikse ele (dimension: thickness/width/length)",
+              "- require_non_null: Belirtilen alan boş olmamalı (field: alan adı)",
+              "",
+              "Soft boost efektleri:",
+              "- add_score: Puan ekle (value: sayı, pozitif=öne al, negatif=geri at)",
+              "- multiply_score: Puanı çarp (value: çarpan)",
+              "",
+              "## Örnekler",
+              "",
+              "Kullanıcı: \"kalınlık 0-8 ise ALV ile başlamalı\"",
+              "→ ruleType: hard_filter, isLocked: true",
+              "  condition: {all: [{field:'input.dim1', op:'gte', value:0}, {field:'input.dim1', op:'lte', value:8}]}",
+              "  effect: {type:'require_prefix', value:'ALV'}",
+              "",
+              "Kullanıcı: \"en boy ve kalınlık varsa stok kodu ACB ile başlayamaz\"",
+              "→ ruleType: hard_filter, isLocked: true",
+              "  condition: {all: [{field:'input.dim1', op:'exists'}, {field:'input.dim2', op:'exists'}, {field:'input.dim3', op:'exists'}]}",
+              "  effect: {type:'reject_prefix', value:'ACB'}",
+              "",
+              "Kullanıcı: \"en boy kalınlık alanları 0 dan farklı ise stok kodu ACB ile başlayamaz\"",
+              "→ ruleType: hard_filter, isLocked: true",
+              "  condition: {all: [{field:'input.dim1', op:'exists'}, {field:'input.dim2', op:'exists'}, {field:'input.dim3', op:'exists'}]}",
+              "  effect: {type:'reject_prefix', value:'ACB'}",
+              "",
+              "Kullanıcı: \"alaşım 7075 ise tam eşleşme zorunlu\"",
+              "→ ruleType: hard_filter, isLocked: true",
+              "  condition: {field:'input.series', op:'eq', value:'7075'}",
+              "  effect: {type:'require_exact_series'}",
+              "",
+              "Kullanıcı: \"CARİ-001 için 5083 veya 5086 serisine +15 puan\"",
+              "→ ruleType: soft_boost, scopeType: customer, scopeValue: 'CARİ-001', isLocked: false",
+              "  condition: {any: [{field:'candidate.series', op:'eq', value:'5083'}, {field:'candidate.series', op:'eq', value:'5086'}]}",
+              "  effect: {type:'add_score', value:15}",
+              "",
+              "Kullanıcı: \"H321 tamper olanları öne al\"",
+              "→ ruleType: soft_boost, isLocked: false",
+              "  condition: {field:'candidate.temper', op:'eq', value:'H321'}",
+              "  effect: {type:'add_score', value:12}",
+              "",
+              "Kullanıcı: \"kalınlık 8'den büyükse APL ile başlamalı\"",
+              "→ ruleType: hard_filter, isLocked: true",
+              "  condition: {field:'input.dim1', op:'gt', value:8}",
+              "  effect: {type:'require_prefix', value:'APL'}",
+              "",
+              "## Kurallar",
+              "- description: Kuralın Türkçe açık açıklamasını yaz",
+              "- Eleme/zorunluluk/yasaklama ifadeleri → hard_filter, isLocked: true",
+              "- Tercih/öne al/puan ver ifadeleri → soft_boost, isLocked: false",
+              "- Cari/müşteri belirtilmemişse → global, scopeValue: null",
+              "- '0 dan farklı', 'boş değil', 'dolu', 'var' → op: 'exists'",
+              "- '0 olan', 'boş', 'yok' → op: 'not_exists'",
+              "- 'başlayamaz', 'başlamamalı', 'olamaz' → reject_prefix",
+              "- 'başlamalı', 'ile başlasın' → require_prefix"
+            ].join("\n")
+          },
+          {
+            role: "user",
+            content: message
+          }
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "rule_definition",
+            strict: false,
+            schema: {
+              type: "object",
+              properties: {
+                ruleType: { type: "string", enum: ["hard_filter", "soft_boost"] },
+                scopeType: { type: "string", enum: ["global", "customer"] },
+                scopeValue: { type: ["string", "null"] },
+                description: { type: "string" },
+                isLocked: { type: "boolean" },
+                condition: { type: "object" },
+                effect: { type: "object" }
+              },
+              required: ["ruleType", "scopeType", "scopeValue", "description", "isLocked", "condition", "effect"]
+            }
+          }
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => "");
+      console.error("[parseRuleDefinitionWithLlm] OpenAI API error:", response.status, errBody.substring(0, 300));
+      return null;
+    }
+
+    const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content) as LlmRulePlan;
+    // condition ve effect string olarak gelebilir, parse et
+    if (typeof parsed.condition === "string") {
+      parsed.condition = JSON.parse(parsed.condition);
+    }
+    if (typeof parsed.effect === "string") {
+      parsed.effect = JSON.parse(parsed.effect);
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export async function planInstructionMessage(args: {
   message: string;
   rowCount: number;
@@ -440,18 +687,31 @@ export async function planInstructionMessage(args: {
 
   let extractionPrompt = expectedItemCount ? sanitizedMessage : null;
 
-  // LLM fallback: regex hiçbir intent bulamadıysa AI'a sor
-  const hasAnyRegexIntent = Boolean(matchPolicy) || Boolean(extractionPrompt) || commands.length > 0;
-  if (!hasAnyRegexIntent) {
-    const llmResult = await parseInstructionWithLlm(sanitizedMessage, args.rowCount);
-    if (llmResult) {
-      if (llmResult.matchPolicy) {
+  // LLM her zaman çağrılır — new_rule intent'i regex ile yakalanamaz
+  const llmResult = await parseInstructionWithLlm(sanitizedMessage, args.rowCount);
+  let rulePreview: ParsedInstructionPlan["rulePreview"] = null;
+
+  if (llmResult) {
+    if (llmResult.intent === "new_rule" && llmResult.rule) {
+      // Kural önizlemesi — UI onay alacak, henüz kaydetme
+      rulePreview = {
+        ruleType: llmResult.rule.ruleType,
+        scopeType: llmResult.rule.scopeType,
+        scopeValue: llmResult.rule.scopeValue,
+        description: llmResult.rule.description,
+        isLocked: llmResult.rule.isLocked,
+        conditionJson: llmResult.rule.condition,
+        effectJson: llmResult.rule.effect
+      };
+    } else {
+      // Diğer intent'ler için regex sonucunu LLM ile birleştir
+      if (llmResult.matchPolicy && !matchPolicy) {
         matchPolicy = llmResult.matchPolicy;
       }
-      if (llmResult.extractionPrompt) {
+      if (llmResult.extractionPrompt && !extractionPrompt) {
         extractionPrompt = llmResult.extractionPrompt;
       }
-      if (llmResult.rowCommands && llmResult.rowCommands.length > 0) {
+      if (llmResult.rowCommands && llmResult.rowCommands.length > 0 && commands.length === 0) {
         for (const cmd of llmResult.rowCommands) {
           const cleanSet: RowInstructionSet = {};
           if (cmd.set.kesimDurumu) cleanSet.kesimDurumu = cmd.set.kesimDurumu as "Kesim Var" | "Kesim Yok";
@@ -484,7 +744,8 @@ export async function planInstructionMessage(args: {
     rowDefaults,
     needsReextract,
     needsRematch,
-    learnable
+    learnable,
+    rulePreview
   };
 }
 

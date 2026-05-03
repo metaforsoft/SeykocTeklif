@@ -1,22 +1,4 @@
 services:
-  matching_db:
-    image: postgres:16
-    container_name: matching_db
-    restart: unless-stopped
-    ports:
-      - "5433:5432"
-    environment:
-      POSTGRES_DB: ${MATCH_PG_DB}
-      POSTGRES_USER: ${MATCH_PG_USER}
-      POSTGRES_PASSWORD: ${MATCH_PG_PASSWORD}
-    volumes:
-      - matching_db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${MATCH_PG_USER} -d ${MATCH_PG_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
   ocr-service:
     build:
       context: .
@@ -29,9 +11,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.runtime
-    depends_on:
-      matching_db:
-        condition: service_healthy
     env_file:
       - path: .env
       - path: .env.local
@@ -44,8 +23,6 @@ services:
       context: .
       dockerfile: Dockerfile.runtime
     depends_on:
-      matching_db:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     env_file:
@@ -60,8 +37,6 @@ services:
       context: .
       dockerfile: Dockerfile.runtime
     depends_on:
-      matching_db:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     env_file:
@@ -76,8 +51,6 @@ services:
       context: .
       dockerfile: Dockerfile.runtime
     depends_on:
-      matching_db:
-        condition: service_healthy
       migrate:
         condition: service_completed_successfully
       ocr-service:
@@ -102,6 +75,3 @@ services:
     volumes:
       - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     restart: unless-stopped
-
-volumes:
-  matching_db_data:

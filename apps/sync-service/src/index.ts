@@ -16,6 +16,8 @@ interface ErpRawRow {
   erp_yukseklik: number | null;
   erp_cap: number | null;
   specific_gravity: number | null;
+  weight_formula: string | null;
+  scrap_formula: string | null;
   cinsi: string | null;
   alasim: string | null;
   tamper: string | null;
@@ -42,6 +44,8 @@ function selectClause(): string {
     numOrNull(c.yukseklik, "erp_yukseklik"),
     numOrNull(c.cap, "erp_cap"),
     numOrNull(c.specificGravity, "specific_gravity"),
+    colOrNull(c.weightFormula, "weight_formula"),
+    colOrNull(c.scrapFormula, "scrap_formula"),
     colOrNull(c.cinsi, "cinsi"),
     colOrNull(c.alasim, "alasim"),
     colOrNull(c.tamper, "tamper")
@@ -102,10 +106,10 @@ async function upsertStockMaster(rows: StockMasterRow[]): Promise<void> {
       await client.query(
         `INSERT INTO stock_master(
            stock_id, stock_code, stock_name, stock_name2, description, category1, birim,
-           erp_en, erp_boy, erp_yukseklik, erp_cap, specific_gravity, cinsi, alasim, tamper,
+           erp_en, erp_boy, erp_yukseklik, erp_cap, specific_gravity, weight_formula, scrap_formula, cinsi, alasim, tamper,
            updated_at, is_active
          )
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,TRUE)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,TRUE)
          ON CONFLICT(stock_id) DO UPDATE SET
            stock_code=EXCLUDED.stock_code,
            stock_name=EXCLUDED.stock_name,
@@ -118,6 +122,8 @@ async function upsertStockMaster(rows: StockMasterRow[]): Promise<void> {
            erp_yukseklik=EXCLUDED.erp_yukseklik,
             erp_cap=EXCLUDED.erp_cap,
             specific_gravity=EXCLUDED.specific_gravity,
+            weight_formula=EXCLUDED.weight_formula,
+            scrap_formula=EXCLUDED.scrap_formula,
             cinsi=EXCLUDED.cinsi,
             alasim=EXCLUDED.alasim,
             tamper=EXCLUDED.tamper,
@@ -136,6 +142,8 @@ async function upsertStockMaster(rows: StockMasterRow[]): Promise<void> {
           r.erp_yukseklik ?? null,
           r.erp_cap ?? null,
           r.specific_gravity ?? null,
+          r.weight_formula ?? null,
+          r.scrap_formula ?? null,
           r.cinsi ?? null,
           r.alasim ?? null,
           r.tamper ?? null,
@@ -253,7 +261,9 @@ async function upsertCanonicalFeatures(rows: StockMasterRow[]): Promise<void> {
             erp_cap: r.erp_cap ?? null,
             cinsi: r.cinsi ?? null,
             alasim: r.alasim ?? null,
-            tamper: r.tamper ?? null
+            tamper: r.tamper ?? null,
+            weight_formula: r.weight_formula ?? null,
+            scrap_formula: r.scrap_formula ?? null
           }),
           f.search_text
         ]
@@ -287,6 +297,8 @@ async function runSync(): Promise<void> {
     erp_yukseklik: r.erp_yukseklik,
     erp_cap: r.erp_cap,
     specific_gravity: r.specific_gravity,
+    weight_formula: r.weight_formula,
+    scrap_formula: r.scrap_formula,
     cinsi: r.cinsi,
     alasim: r.alasim,
     tamper: r.tamper,

@@ -70,23 +70,33 @@ function resolveField(path: string, input: ExtractedFromInput, candidate: Candid
 function compareLeaf(fieldValue: unknown, op: string, expected: unknown): boolean {
   switch (op) {
     case "=":
+    case "eq":
       return fieldValue === expected;
     case "!=":
+    case "ne":
       return fieldValue !== expected;
     case ">":
+    case "gt":
       return Number(fieldValue) > Number(expected);
     case ">=":
+    case "gte":
       return Number(fieldValue) >= Number(expected);
     case "<":
+    case "lt":
       return Number(fieldValue) < Number(expected);
     case "<=":
+    case "lte":
       return Number(fieldValue) <= Number(expected);
     case "starts_with":
       return String(fieldValue ?? "").toUpperCase().startsWith(String(expected ?? "").toUpperCase());
+    case "ends_with":
+      return String(fieldValue ?? "").toUpperCase().endsWith(String(expected ?? "").toUpperCase());
     case "contains":
       return String(fieldValue ?? "").toLocaleLowerCase("tr-TR").includes(String(expected ?? "").toLocaleLowerCase("tr-TR"));
     case "exists":
       return fieldValue !== null && fieldValue !== undefined && String(fieldValue).trim() !== "";
+    case "not_exists":
+      return fieldValue === null || fieldValue === undefined || String(fieldValue).trim() === "";
     case "between": {
       const [minValue, maxValue] = Array.isArray(expected) ? expected : [undefined, undefined];
       const numeric = Number(fieldValue);
