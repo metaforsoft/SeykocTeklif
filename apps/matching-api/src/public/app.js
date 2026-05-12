@@ -212,7 +212,7 @@ function parseInstructionTargetScope(message) {
 function rowMatchesTargetScope(row, target) {
   if (!target) return true;
   const selected = selectedCandidate(row);
-  const tamper = String(row.tamper ?? selected?.tamper ?? "").trim().toUpperCase();
+  const tamper = String(selected?.tamper ?? row.tamper ?? "").trim().toUpperCase();
   const alasim = String(selected?.alasim ?? row.alasim ?? "").trim();
   const stockCode = String(selected?.stock_code ?? "").toUpperCase();
   const stockName = String(selected?.stock_name ?? "").toLocaleLowerCase("tr-TR");
@@ -1599,7 +1599,7 @@ function toDecimalOrNull(value) {
 function roundWeight(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
-  return Number(n.toFixed(4));
+  return Number(n.toFixed(5));
 }
 
 function firstFiniteNumber(...values) {
@@ -1649,16 +1649,30 @@ function evaluateStockFormula(formula, variables) {
   }
 }
 
+function formulaReferencesOnlyLengthWithDiameter(formula) {
+  const normalized = String(formula ?? "")
+    .toLocaleUpperCase("tr-TR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return /(?:\[|\b)(?:CAP|ÇAP)(?:\]|\b)/.test(normalized)
+    && /(?:\[|\b)BOY(?:\]|\b)/.test(normalized)
+    && !/(?:\[|\b)EN(?:\]|\b)/.test(normalized);
+}
+
 function calculateRowWeights(row) {
   const selected = selectedCandidate(row);
+  const weightFormula = selected?.weight_formula ?? "";
+  const scrapFormula = selected?.scrap_formula ?? "";
+  const useSecondDimensionAsLength = formulaReferencesOnlyLengthWithDiameter(weightFormula)
+    || formulaReferencesOnlyLengthWithDiameter(scrapFormula);
   const cap = firstFiniteNumber(row.dimKalinlik, selected?.erp_cap);
   const en = firstFiniteNumber(row.dimEn, selected?.erp_en);
-  const boy = firstFiniteNumber(row.dimBoy, selected?.erp_boy);
+  const boy = firstFiniteNumber(row.dimBoy, selected?.erp_boy, useSecondDimensionAsLength ? row.dimEn : null);
   const yukseklik = firstFiniteNumber(selected?.erp_yukseklik);
   const specificGravity = firstFiniteNumber(selected?.specific_gravity);
   const quantity = firstFiniteNumber(row.quantity) ?? 1;
 
-  if (!cap || !en || !boy || !specificGravity || !selected?.weight_formula) {
+  if (!cap || !boy || !specificGravity || !selected?.weight_formula) {
     return null;
   }
 
@@ -1692,8 +1706,8 @@ function refreshWeightInputs(index) {
   if (!row) return;
   const kgInput = resultBodyEl?.querySelector(`[data-k='kg'][data-i='${index}']`);
   const talasInput = resultBodyEl?.querySelector(`[data-k='talas-mik'][data-i='${index}']`);
-  if (kgInput) kgInput.value = dimensionInput(row.kg);
-  if (talasInput) talasInput.value = dimensionInput(row.talasMik);
+  if (kgInput) kgInput.value = fixedDecimalInput(row.kg, 5);
+  if (talasInput) talasInput.value = fixedDecimalInput(row.talasMik, 5);
 }
 
 function displayDim(value) {
@@ -1707,6 +1721,13 @@ function dimensionInput(value) {
   return decimalInput(value);
 }
 
+function fixedDecimalInput(value, fractionDigits = 5) {
+  if (value === null || value === undefined || value === "") return "";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return decimalInput(value);
+  return n.toFixed(fractionDigits).replace(".", ",");
+}
+
 function parseDimParts(dimText) {
   const parts = String(dimText ?? "")
     .split("x")
@@ -1717,6 +1738,34 @@ function parseDimParts(dimText) {
     parts[1] ?? null, // en/et kal
     parts[2] ?? null // boy
   ];
+}
+
+function countDimParts(dimText) {
+  return String(dimText ?? "")
+    .split("x")
+    .map((part) => Number(part.trim().replace(",", ".")))
+    .filter((n) => Number.isFinite(n)).length;
+}
+
+function rowDimensionsForCandidate(dimText, candidate) {
+  const [defaultKalinlik, defaultEn, defaultBoy] = parseDimParts(dimText);
+  const hasTwoInputDimensions = countDimParts(dimText) === 2;
+  const usesDiameterLengthFormula = formulaReferencesOnlyLengthWithDiameter(candidate?.weight_formula)
+    || formulaReferencesOnlyLengthWithDiameter(candidate?.scrap_formula);
+
+  if (hasTwoInputDimensions && usesDiameterLengthFormula) {
+    return {
+      dimKalinlik: defaultKalinlik,
+      dimEn: null,
+      dimBoy: defaultEn
+    };
+  }
+
+  return {
+    dimKalinlik: defaultKalinlik,
+    dimEn: defaultEn,
+    dimBoy: defaultBoy
+  };
 }
 
 function ensureOfferDefaults(row) {
@@ -1746,6 +1795,12 @@ function ensureOfferDefaults(row) {
 
 function syncRowStockAttributes(index, candidate) {
   if (!rows[index]) return;
+  if (countDimParts(rows[index].dim_text) > 0) {
+    const mappedDims = rowDimensionsForCandidate(rows[index].dim_text, candidate);
+    rows[index].dimKalinlik = mappedDims.dimKalinlik;
+    rows[index].dimEn = mappedDims.dimEn;
+    rows[index].dimBoy = mappedDims.dimBoy;
+  }
   rows[index].alasim = candidate?.alasim ?? null;
   rows[index].tamper = candidate?.tamper ?? null;
   recalculateRowWeights(index);
@@ -2105,11 +2160,12 @@ function renderTable() {
     const selected = selectedCandidate(row);
     const candidates = Array.isArray(row.candidates) ? row.candidates : [];
     const [defaultKalinlik, defaultEn, defaultBoy] = parseDimParts(row.dim_text);
+    const keepEnBlankForDiameterLength = row.dimEn == null && row.dimBoy != null && countDimParts(row.dim_text) === 2;
     const kalinlik = row.dimKalinlik ?? defaultKalinlik;
-    const en = row.dimEn ?? defaultEn;
+    const en = keepEnBlankForDiameterLength ? null : (row.dimEn ?? defaultEn);
     const boy = row.dimBoy ?? defaultBoy;
     const alasim = selected?.alasim ?? row.alasim ?? "-";
-    const tamper = row.tamper ?? selected?.tamper ?? "-";
+    const tamper = selected?.tamper ?? row.tamper ?? "-";
     const kesim = row.kesimDurumu || "Kesim Var";
     const mensei = row.mensei || "İTHAL";
     const kg = row.kg ?? null;
@@ -2178,7 +2234,7 @@ function renderTable() {
             data-k="kg"
             data-i="${index}"
             class="qty-input"
-            value="${dimensionInput(kg)}"
+            value="${fixedDecimalInput(kg, 5)}"
             placeholder="Kg"
             ${matchedOfferLocked ? "disabled" : ""}
           />
@@ -2198,7 +2254,7 @@ function renderTable() {
             data-k="talas-mik"
             data-i="${index}"
             class="qty-input"
-            value="${dimensionInput(talasMik)}"
+            value="${fixedDecimalInput(talasMik, 5)}"
             placeholder="Talaş Mik."
             ${matchedOfferLocked ? "disabled" : ""}
           />
@@ -2317,14 +2373,19 @@ async function rematchExistingRows(options = {}) {
       });
 
       const candidates = res.results || [];
+      const selectedCandidate = candidates[0] ?? null;
+      const mappedDims = rowDimensionsForCandidate(rows[index].dim_text, selectedCandidate);
       rows[index] = {
         ...rows[index],
         matchHistoryId: Number(res.matchHistoryId),
         candidates,
-        selected_stock_id: candidates[0]?.stock_id ?? null,
-        selected_score: candidates[0]?.score ?? null,
-        alasim: candidates[0]?.alasim ?? rows[index].alasim ?? null,
-        tamper: candidates[0]?.tamper ?? rows[index].tamper ?? null
+        selected_stock_id: selectedCandidate?.stock_id ?? null,
+        selected_score: selectedCandidate?.score ?? null,
+        dimKalinlik: mappedDims.dimKalinlik,
+        dimEn: mappedDims.dimEn,
+        dimBoy: mappedDims.dimBoy,
+        alasim: selectedCandidate?.alasim ?? rows[index].alasim ?? null,
+        tamper: selectedCandidate?.tamper ?? rows[index].tamper ?? null
       };
     });
 
@@ -2370,18 +2431,19 @@ async function runAnalysis(doc, options = {}) {
       alert(`Uyarı (Satır ${index + 1}): ${res.ruleWarning}`);
     }
     const candidates = res.results || [];
-    const [defaultKalinlik, defaultEn, defaultBoy] = parseDimParts(item.dim_text);
+    const selectedCandidate = candidates[0] ?? null;
+    const mappedDims = rowDimensionsForCandidate(item.dim_text, selectedCandidate);
     rows.push({
       matchHistoryId: Number(res.matchHistoryId),
       candidates,
-      selected_stock_id: candidates[0]?.stock_id ?? null,
-      selected_score: candidates[0]?.score ?? null,
+      selected_stock_id: selectedCandidate?.stock_id ?? null,
+      selected_score: selectedCandidate?.score ?? null,
       dim_text: item.dim_text,
-      dimKalinlik: defaultKalinlik,
-      dimEn: defaultEn,
-      dimBoy: defaultBoy,
-      alasim: candidates[0]?.alasim ?? item.alasim ?? null,
-      tamper: item.temper ?? candidates[0]?.tamper ?? null,
+      dimKalinlik: mappedDims.dimKalinlik,
+      dimEn: mappedDims.dimEn,
+      dimBoy: mappedDims.dimBoy,
+      alasim: selectedCandidate?.alasim ?? item.alasim ?? null,
+      tamper: selectedCandidate?.tamper ?? item.temper ?? null,
       kesimDurumu: item.kesimDurumu || "Kesim Var",
       mensei: item.mensei || "İTHAL",
       quantity: item.qty,
@@ -2437,8 +2499,8 @@ function mapRowsForOfferSave() {
     dimKalinlik: row.dimKalinlik ?? null,
     dimEn: row.dimEn ?? null,
     dimBoy: row.dimBoy ?? null,
-    alasim: row.alasim ?? selectedCandidate(row)?.alasim ?? null,
-    tamper: row.tamper ?? selectedCandidate(row)?.tamper ?? null,
+    alasim: selectedCandidate(row)?.alasim ?? row.alasim ?? null,
+    tamper: selectedCandidate(row)?.tamper ?? row.tamper ?? null,
     kesimDurumu: row.kesimDurumu ?? null,
     mensei: row.mensei ?? "İTHAL",
     user_note: row.user_note ?? null,
@@ -2457,7 +2519,7 @@ function collectMatchedTableExportRows() {
       en: row.dimEn ?? null,
       boy: row.dimBoy ?? null,
       alasim: selected?.alasim ?? row.alasim ?? "",
-      tamper: row.tamper ?? selected?.tamper ?? "",
+      tamper: selected?.tamper ?? row.tamper ?? "",
       stokKodu: selected?.stock_code ?? "",
       stokAdi: selected?.stock_name ?? "",
       birim: selected?.birim ?? "",
@@ -2617,6 +2679,13 @@ async function loadMatchedOffer(recordId) {
         birim,
         alasim,
         tamper,
+        erp_cap: row.erp_cap ?? null,
+        erp_en: row.erp_en ?? null,
+        erp_boy: row.erp_boy ?? null,
+        erp_yukseklik: row.erp_yukseklik ?? null,
+        specific_gravity: row.specific_gravity ?? null,
+        weight_formula: row.weight_formula ?? null,
+        scrap_formula: row.scrap_formula ?? null,
         score: row.selected_score ?? 0
       }] : [],
       selected_stock_id: stockId,
@@ -2640,6 +2709,11 @@ async function loadMatchedOffer(recordId) {
       user_note: row.user_note || "",
       isManual: Boolean(row.isManual)
     };
+  });
+  rows.forEach((_row, index) => {
+    if (rows[index].kg == null || rows[index].talasMik == null) {
+      recalculateRowWeights(index);
+    }
   });
   extractedDoc = {
     source_type: offer.sourceType || "matched_offer",

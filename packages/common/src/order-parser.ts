@@ -5,6 +5,7 @@ const DIM_FUZZY_REGEX = /(\d{1,4})\D{1,8}(\d{1,4})(?:\D{1,8}(\d{1,4}))?/i;
 const FUZZY_TRIPLE_HINT_REGEX = /\b\d{1,4}\D{1,8}\d{1,4}\D{1,8}\d{1,4}\b/i;
 const LABELED_DIM_REGEX = /(?:di[sş]\s*[çc]ap)\s*(\d+(?:[\.,]\d+)?)\s*mm?.*?(?:i[çc]\s*[çc]ap)\s*(\d+(?:[\.,]\d+)?)\s*mm?.*?(?:boy)\s*(\d+(?:[\.,]\d+)?)\s*mm?/i;
 const QTY_REGEX = /(?:^|\s|>|-)(\d+(?:[\.,]\d+)?)\s*(ad\.?|adet|a[d1i]\.?|mik\.?|miktar)\b/i;
+const UNIT_PRICE_REGEX = /\b(?:b\s*\.?\s*fiyat|bfiyat|birim\s*fiyat|fiyat|unit\s*price|price)\s*(?:=|:)?\s*(\d+(?:[\.,]\d+)?)/i;
 const SERIES_HINT_REGEX = /\b([1-9]\d{3})(?:\s*serisi)?\b/gi;
 const CHAT_NOISE_REGEX = /(mesaj|iletildi|çarşamba|carsamba|günaydın|gunaydin|mailden|işleme alacağım|isleme alacagim|tamamdır|tamamdir|polinet|whatsapp|lte|vo\)|%|\d{1,2}:\d{2})/i;
 const HEADER_SERIES_REGEX = /\b(?:AL|AA|A1)\s*([1-9]\d{3})\b/i;
@@ -67,6 +68,13 @@ function parseQty(normalized: string): number | null {
   if (!qtyMatch) return null;
   const qty = Number(String(qtyMatch[1]).replace(",", "."));
   return Number.isFinite(qty) ? qty : null;
+}
+
+function parseUnitPrice(normalized: string): number | null {
+  const priceMatch = normalized.match(UNIT_PRICE_REGEX);
+  if (!priceMatch) return null;
+  const price = Number(String(priceMatch[1]).replace(",", "."));
+  return Number.isFinite(price) ? price : null;
 }
 
 function collectFuzzyDims(normalized: string, qty: number | null): number[] {
@@ -148,6 +156,7 @@ function parseSingleLine(line: string, headerContext: string | null, defaultSeri
   if (!looksLikeOrderLine(normalized)) return null;
 
   const qty = parseQty(normalized);
+  const birimFiyat = parseUnitPrice(normalized);
   let dimMatch = normalized.match(DIM_REGEX);
   let dims: number[] = [];
 
@@ -191,6 +200,7 @@ function parseSingleLine(line: string, headerContext: string | null, defaultSeri
     dim3: dims[2] ?? null,
     qty,
     series,
+    birimFiyat,
     header_context: headerContext,
     confidence: computeConfidence({ dims, qty, series, raw: line })
   };

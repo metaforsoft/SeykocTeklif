@@ -940,7 +940,7 @@ function renderOffersTable(items) {
   `;
 }
 
-async function renderMatchedOffers() {
+async function renderMatchedOffers(user) {
   pageEyebrowEl.textContent = "Teklifler";
   pageTitleEl.textContent = "Eşleşmiş Teklifler";
   const data = await api("/matched-offers");
@@ -954,12 +954,22 @@ async function renderMatchedOffers() {
     headerRow.appendChild(th);
   }
   pageContentEl.querySelectorAll("[data-offer-id]").forEach((row) => {
-    if (!(row instanceof HTMLElement) || row.querySelector("[data-offer-delete]")) return;
+    if (!(row instanceof HTMLElement) || row.querySelector("[data-offer-delete]") || row.querySelector("[data-offer-clear-erp]")) return;
     const offerId = row.getAttribute("data-offer-id");
     const offerStatus = String(row.getAttribute("data-offer-status") || "").trim().toLowerCase();
     const td = document.createElement("td");
     if (offerStatus === "sent") {
-      td.textContent = "-";
+      if (user?.role === "admin") {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "btn-secondary btn-small";
+        button.setAttribute("data-offer-clear-erp", offerId || "");
+        button.setAttribute("data-offer-title", row.children[1]?.textContent || offerId || "");
+        button.textContent = "ERP Entegrasyonunu Kaldir";
+        td.appendChild(button);
+      } else {
+        td.textContent = "-";
+      }
     } else {
       const button = document.createElement("button");
       button.type = "button";
@@ -970,6 +980,28 @@ async function renderMatchedOffers() {
       td.appendChild(button);
     }
     row.appendChild(td);
+  });
+
+  pageContentEl.querySelectorAll("[data-offer-clear-erp]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const target = event.currentTarget;
+      const offerId = target.getAttribute("data-offer-clear-erp");
+      if (!offerId) return;
+      const title = target.getAttribute("data-offer-title") || offerId;
+      const confirmed = confirm(`Bu teklifin ERP gonderildi isareti kaldirilacak:\n${title}\n\nTeklif yeniden ERP'ye gonderilebilir hale gelecek. Devam etmek istiyor musunuz?`);
+      if (!confirmed) return;
+      target.setAttribute("disabled", "disabled");
+      try {
+        await api(`/matched-offers/${offerId}/clear-erp-integration`, {
+          method: "POST"
+        });
+        await renderMatchedOffers(user);
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "ERP entegrasyonu kaldirilamadi.");
+        target.removeAttribute("disabled");
+      }
+    });
   });
 
   pageContentEl.querySelectorAll("[data-offer-delete]").forEach((button) => {
@@ -986,7 +1018,7 @@ async function renderMatchedOffers() {
         await api(`/matched-offers/${offerId}`, {
           method: "DELETE"
         });
-        await renderMatchedOffers();
+        await renderMatchedOffers(user);
       } catch (error) {
         alert(error instanceof Error ? error.message : "Kayit silinemedi.");
         target.removeAttribute("disabled");
@@ -1003,6 +1035,113 @@ async function renderMatchedOffers() {
       window.open(`/ui/?recordId=${offerId}${readonlyParam}`, "_blank", "noopener");
     });
   });
+
+  setupMatchedOffersTableControls();
+}
+
+function setupMatchedOffersTableControls() {
+  const table = pageContentEl.querySelector(".portal-table");
+  const tbody = table?.querySelector("tbody");
+  const headerRow = table?.querySelector("thead tr");
+  if (!table || !tbody || !headerRow) return;
+
+  const rows = Array.from(tbody.querySelectorAll("tr"));
+  const columnCount = headerRow.children.length;
+  const state = {
+    page: 1,
+    pageSize: 10,
+    filters: new Array(columnCount).fill("")
+  };
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "table-toolbar";
+  toolbar.innerHTML = `
+    <div class="table-toolbar-status" data-offer-table-status></div>
+    <label class="table-page-size">
+      <span>Sayfa</span>
+      <select data-offer-page-size>
+        <option value="10">10</option>
+        <option value="25">25</option>
+        <option value="50">50</option>
+      </select>
+    </label>
+  `;
+  table.parentElement?.insertBefore(toolbar, table);
+
+  const filterRow = document.createElement("tr");
+  filterRow.className = "table-filter-row";
+  Array.from(headerRow.children).forEach((cell, index) => {
+    const th = document.createElement("th");
+    const input = document.createElement("input");
+    input.type = "search";
+    input.setAttribute("aria-label", `${cell.textContent?.trim() || "Kolon"} ara`);
+    input.dataset.offerColumnFilter = String(index);
+    th.appendChild(input);
+    filterRow.appendChild(th);
+  });
+  headerRow.insertAdjacentElement("afterend", filterRow);
+
+  const pagination = document.createElement("div");
+  pagination.className = "table-pagination";
+  pagination.setAttribute("data-offer-table-pagination", "1");
+  table.parentElement?.appendChild(pagination);
+
+  function rowMatches(row) {
+    return state.filters.every((filter, index) => {
+      const query = String(filter || "").trim().toLocaleLowerCase("tr-TR");
+      if (!query) return true;
+      const text = row.children[index]?.textContent || "";
+      return text.toLocaleLowerCase("tr-TR").includes(query);
+    });
+  }
+
+  function applyTableView() {
+    const matchedRows = rows.filter(rowMatches);
+    const totalPages = Math.max(1, Math.ceil(matchedRows.length / state.pageSize));
+    state.page = Math.min(Math.max(1, state.page), totalPages);
+    const start = (state.page - 1) * state.pageSize;
+    const pageRows = new Set(matchedRows.slice(start, start + state.pageSize));
+
+    rows.forEach((row) => {
+      row.hidden = !pageRows.has(row);
+    });
+
+    const from = matchedRows.length === 0 ? 0 : start + 1;
+    const to = Math.min(start + state.pageSize, matchedRows.length);
+    toolbar.querySelector("[data-offer-table-status]").textContent = `${from}-${to} / ${matchedRows.length} kayit`;
+    pagination.innerHTML = `
+      <button type="button" class="btn-secondary btn-small" data-page-step="-1" ${state.page <= 1 ? "disabled" : ""}>Onceki</button>
+      <span>Sayfa ${state.page} / ${totalPages}</span>
+      <button type="button" class="btn-secondary btn-small" data-page-step="1" ${state.page >= totalPages ? "disabled" : ""}>Sonraki</button>
+    `;
+  }
+
+  filterRow.querySelectorAll("[data-offer-column-filter]").forEach((input) => {
+    input.addEventListener("input", (event) => {
+      const target = event.currentTarget;
+      const index = Number(target.dataset.offerColumnFilter);
+      state.filters[index] = target.value;
+      state.page = 1;
+      applyTableView();
+    });
+  });
+
+  toolbar.querySelector("[data-offer-page-size]")?.addEventListener("change", (event) => {
+    state.pageSize = Number(event.currentTarget.value) || 10;
+    state.page = 1;
+    applyTableView();
+  });
+
+  pagination.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const step = Number(target.dataset.pageStep);
+    if (!step) return;
+    state.page += step;
+    applyTableView();
+  });
+
+  applyTableView();
 }
 
 function renderRulesTable(items) {
@@ -1570,7 +1709,7 @@ async function renderApp() {
     } else if (route.id === "matching-rules") {
       await renderMatchingRulesV2();
     } else if (route.id === "matched-offers") {
-      await renderMatchedOffers();
+      await renderMatchedOffers(user);
     } else {
       await renderDashboard();
     }

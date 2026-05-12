@@ -10,7 +10,7 @@ import { extractSourceDocument } from "./source-extract";
 import { recordExtractionFeedback, saveExtractionProfile } from "./extraction-learning";
 import { commitInstructionPolicy, parseMatchPolicy, planInstructionMessage, parseRuleDefinitionWithLlm } from "./instruction-policies";
 import { evaluateHardRules, evaluateSoftBoosts, MatchingRuleRecord, RuleCondition, RuleEffect } from "./rule-engine";
-import { authenticateCredentials, createSession, destroySession, ensureDefaultAdminUser, hashPassword, resolveRequestUser, shouldRedirectToLogin, isPublicPath } from "./auth";
+import { authenticateCredentials, createSession, destroySession, ensureDefaultAdminUser, hashPassword, resolveRequestUser, shouldRedirectToLogin, isPublicPath, type AuthUser } from "./auth";
 import { getLookupOptions, postUyumRequest } from "./uyum-lookups";
 
 const app = Fastify({ logger: true });
@@ -289,6 +289,19 @@ function compactDynamicFields(fields: Record<string, string | number | null | un
   return Object.fromEntries(
     Object.entries(fields).filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== "")
   ) as Record<string, string | number>;
+}
+
+function roundUyumDecimal(value: unknown, fractionDigits = 5): number | null {
+  const parsed = toSafeNumber(value);
+  if (parsed === null) return null;
+  return Number(parsed.toFixed(fractionDigits));
+}
+
+function formatUyumDynamicDecimal(value: unknown, fractionDigits?: number): string | null {
+  const parsed = toSafeNumber(value);
+  if (parsed === null) return null;
+  const formatted = typeof fractionDigits === "number" ? parsed.toFixed(fractionDigits) : String(parsed);
+  return formatted.replace(".", ",");
 }
 
 function toUyumCuttingValue(value: unknown): number | null {
@@ -981,6 +994,7 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
     const stockId = normalizePositiveInteger(row.selected_stock_id) as number;
     // Miktar (kg) — ERP qty alanı
     const miktar = toSafeNumber(row.kg) ?? 0;
+    const talasMiktar = toSafeNumber(row.talasMik) ?? 0;
     // Adet (parça sayısı) — ERP QtyFreePrm alanı
     const adet = normalizePositiveInteger(row.quantity) ?? 0;
     // Birim fiyat
@@ -997,7 +1011,7 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
       DcardCode: stockCode,
       ItemAttributeCode1: mensei,
       unitId: 165,
-      qty: miktar,
+      qty: roundUyumDecimal(miktar, 5) ?? 0,
       QtyFreePrm: adet > 0 ? adet : undefined,
       unitPriceTra: birimFiyat,
       unitPrice: birimFiyat,
@@ -1010,13 +1024,13 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
       curTraId: 114,
       CurRateTra: 1,
       dynamicFields: compactDynamicFields({
-        ZZ_HEIGHT: toSafeNumber(row.dimBoy),
-        ZZ_WIDTH: toSafeNumber(row.dimEn),
-        ZZ_THICKNESS: toSafeNumber(row.dimKalinlik),
+        ZZ_HEIGHT: formatUyumDynamicDecimal(row.dimBoy),
+        ZZ_WIDTH: formatUyumDynamicDecimal(row.dimEn),
+        ZZ_THICKNESS: formatUyumDynamicDecimal(row.dimKalinlik),
         ZZ_CUSTOMER_PART: String(row.musteriParcaNo ?? "").trim() || null,
         ZZ_CUSTOMER_NO: String(row.musteriNo ?? "").trim() || null,
         ZZ_CUTTING: toUyumCuttingValue(row.kesimDurumu),
-        ZZ_QTY_SHAVINGS: toSafeNumber(row.talasMik)
+        ZZ_QTY_SHAVINGS: formatUyumDynamicDecimal(talasMiktar, 5) ?? "0,00000"
       })
     };
   });
@@ -1043,6 +1057,115 @@ async function buildInsertOfferPayload(body: SendMatchedOfferToErpBody): Promise
       Note1: note1 ?? undefined,
       CurRateTra: 1
     }
+  };
+}
+
+async function loadSavedMatchedOfferForErp(offerId: number, authUser: AuthUser): Promise<SendMatchedOfferToErpBody | null> {
+  const offerRes = await matchPool.query<{
+    id: string;
+    offer_date: string | null;
+    movement_code: string | null;
+    customer_code: string | null;
+    representative_code: string | null;
+    warehouse_code: string | null;
+    payment_plan_code: string | null;
+    incoterm_name: string | null;
+    special_code: string | null;
+    delivery_date: string | null;
+    description: string | null;
+    created_by_user_id: string | null;
+  }>(
+    `SELECT id::text,
+            TO_CHAR(offer_date, 'YYYY-MM-DD') AS offer_date,
+            movement_code, customer_code, representative_code,
+            warehouse_code, payment_plan_code, incoterm_name, special_code,
+            TO_CHAR(delivery_date, 'YYYY-MM-DD') AS delivery_date,
+            description,
+            created_by_user_id::text
+     FROM matched_offers
+     WHERE id = $1
+     LIMIT 1`,
+    [offerId]
+  );
+
+  if (offerRes.rowCount === 0) return null;
+  const offer = offerRes.rows[0];
+  if (authUser.role !== "admin" && Number(offer.created_by_user_id || 0) !== authUser.id) {
+    throw new Error("Bu kayda erisim yetkiniz yok");
+  }
+
+  const linesRes = await matchPool.query<{
+    match_history_id: string | null;
+    selected_stock_id: number | null;
+    selected_score: string | null;
+    quantity: string | null;
+    kg: string | null;
+    birim_fiyat: string | null;
+    talas_mik: string | null;
+    musteri_no: string | null;
+    musteri_parca_no: string | null;
+    dim_kalinlik: string | null;
+    dim_en: string | null;
+    dim_boy: string | null;
+    alasim: string | null;
+    tamper: string | null;
+    mensei: string | null;
+    kesim_durumu: string | null;
+    is_manual: boolean;
+    user_note: string | null;
+    header_context: string | null;
+  }>(
+    `SELECT l.match_history_id::text, l.selected_stock_id, l.selected_score::text,
+            l.quantity::text, l.kg::text, l.birim_fiyat::text, l.talas_mik::text,
+            l.musteri_no, l.musteri_parca_no,
+            l.dim_kalinlik::text, l.dim_en::text, l.dim_boy::text,
+            COALESCE(NULLIF(sm.alasim, ''), NULLIF(l.line_json->>'alasim', '')) AS alasim,
+            COALESCE(NULLIF(sm.tamper, ''), NULLIF(l.line_json->>'tamper', '')) AS tamper,
+            NULLIF(l.line_json->>'mensei', '') AS mensei,
+            l.kesim_durumu, l.is_manual,
+            NULLIF(l.line_json->>'user_note', '') AS user_note,
+            COALESCE(NULLIF(l.line_json->>'header_context', ''), l.source_line_text) AS header_context
+     FROM matched_offer_lines l
+     LEFT JOIN stock_master sm ON sm.stock_id = l.selected_stock_id
+     WHERE l.matched_offer_id = $1
+     ORDER BY l.line_no`,
+    [offerId]
+  );
+
+  return {
+    offerId,
+    offerDate: offer.offer_date,
+    movementCode: offer.movement_code,
+    customerCode: offer.customer_code,
+    representativeCode: offer.representative_code,
+    warehouseCode: offer.warehouse_code,
+    paymentPlanCode: offer.payment_plan_code,
+    incotermName: offer.incoterm_name,
+    transportTypeCode: offer.incoterm_name,
+    specialCode: offer.special_code,
+    deliveryDate: offer.delivery_date,
+    description: offer.description,
+    rows: linesRes.rows.map((row) => ({
+      matchHistoryId: row.match_history_id ? Number(row.match_history_id) : null,
+      selected_stock_id: row.selected_stock_id && row.selected_stock_id > 0 ? row.selected_stock_id : null,
+      selected_score: row.selected_stock_id && row.selected_stock_id > 0 ? toSafeNumber(row.selected_score) : null,
+      quantity: toSafeNumber(row.quantity),
+      kg: toSafeNumber(row.kg),
+      birimFiyat: toSafeNumber(row.birim_fiyat),
+      talasMik: toSafeNumber(row.talas_mik),
+      musteriNo: row.musteri_no,
+      musteriParcaNo: row.musteri_parca_no,
+      dimKalinlik: toSafeNumber(row.dim_kalinlik),
+      dimEn: toSafeNumber(row.dim_en),
+      dimBoy: toSafeNumber(row.dim_boy),
+      alasim: row.alasim,
+      tamper: row.tamper,
+      mensei: row.mensei,
+      kesimDurumu: row.kesim_durumu,
+      user_note: row.user_note,
+      header_context: row.header_context,
+      isManual: row.is_manual
+    }))
   };
 }
 
@@ -1198,18 +1321,34 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
       let stockCode: string | null = null;
       let stockName: string | null = null;
       let birim: string | null = null;
+      let stockAlasim: string | null = null;
+      let stockTamper: string | null = null;
 
       if (stockId && stockId > 0) {
-        const stockRes = await client.query<{ stock_code: string | null; stock_name: string | null; birim: string | null }>(
-          "SELECT stock_code, stock_name, birim FROM stock_master WHERE stock_id = $1 LIMIT 1",
+        const stockRes = await client.query<{
+          stock_code: string | null;
+          stock_name: string | null;
+          birim: string | null;
+          alasim: string | null;
+          tamper: string | null;
+        }>(
+          "SELECT stock_code, stock_name, birim, alasim, tamper FROM stock_master WHERE stock_id = $1 LIMIT 1",
           [stockId]
         );
         if ((stockRes.rowCount ?? 0) > 0) {
           stockCode = stockRes.rows[0].stock_code;
           stockName = stockRes.rows[0].stock_name;
           birim = stockRes.rows[0].birim;
+          stockAlasim = stockRes.rows[0].alasim;
+          stockTamper = stockRes.rows[0].tamper;
         }
       }
+
+      const lineJson = {
+        ...row,
+        alasim: stockAlasim ?? row.alasim ?? null,
+        tamper: stockTamper ?? row.tamper ?? null
+      };
 
       await client.query(
         `INSERT INTO matched_offer_lines(
@@ -1238,7 +1377,7 @@ async function upsertMatchedOffer(currentUserId: number, body: SaveMatchedOfferB
           selectedScore,
           Boolean(row.isManual),
           String(row.header_context ?? row.user_note ?? "").trim() || null,
-          JSON.stringify(row)
+          JSON.stringify(lineJson)
         ]
       );
     }
@@ -1562,16 +1701,31 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
     kesim_durumu: string | null;
     selected_score: string | null;
     is_manual: boolean;
+    erp_en: string | null;
+    erp_boy: string | null;
+    erp_yukseklik: string | null;
+    erp_cap: string | null;
+    specific_gravity: string | null;
+    weight_formula: string | null;
+    scrap_formula: string | null;
   }>(
-    `SELECT line_no, match_history_id::text, selected_stock_id, stock_code, stock_name, birim,
+    `SELECT l.line_no, l.match_history_id::text, l.selected_stock_id, l.stock_code, l.stock_name, l.birim,
             quantity::text, kg::text, birim_fiyat::text, talas_mik::text, musteri_no, musteri_parca_no,
             dim_kalinlik::text, dim_en::text, dim_boy::text,
-            NULLIF(line_json->>'alasim', '') AS alasim,
-            NULLIF(line_json->>'tamper', '') AS tamper,
-            kesim_durumu, selected_score::text, is_manual
-     FROM matched_offer_lines
-     WHERE matched_offer_id = $1
-     ORDER BY line_no`,
+            COALESCE(NULLIF(sm.alasim, ''), NULLIF(l.line_json->>'alasim', '')) AS alasim,
+            COALESCE(NULLIF(sm.tamper, ''), NULLIF(l.line_json->>'tamper', '')) AS tamper,
+            l.kesim_durumu, l.selected_score::text, l.is_manual,
+            sm.erp_en::text,
+            sm.erp_boy::text,
+            sm.erp_yukseklik::text,
+            sm.erp_cap::text,
+            sm.specific_gravity::text,
+            sm.weight_formula,
+            sm.scrap_formula
+     FROM matched_offer_lines l
+     LEFT JOIN stock_master sm ON sm.stock_id = l.selected_stock_id
+     WHERE l.matched_offer_id = $1
+     ORDER BY l.line_no`,
     [offerId]
   );
 
@@ -1617,7 +1771,14 @@ app.get<{ Params: { id: string } }>("/matched-offers/:id", async (request, reply
       isManual: row.is_manual,
       stock_code: row.stock_code,
       stock_name: row.stock_name,
-      birim: row.birim
+      birim: row.birim,
+      erp_en: toSafeNumber(row.erp_en),
+      erp_boy: toSafeNumber(row.erp_boy),
+      erp_yukseklik: toSafeNumber(row.erp_yukseklik),
+      erp_cap: toSafeNumber(row.erp_cap),
+      specific_gravity: toSafeNumber(row.specific_gravity),
+      weight_formula: row.weight_formula,
+      scrap_formula: row.scrap_formula
     }))
   };
 });
@@ -1658,6 +1819,33 @@ app.delete<{ Params: { id: string } }>("/matched-offers/:id", async (request, re
   return reply.code(500).send({ error: "Kayit silinemedi" });
 });
 
+app.post<{ Params: { id: string } }>("/matched-offers/:id/clear-erp-integration", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser || authUser.role !== "admin") {
+    return reply.code(403).send({ error: "Admin yetkisi gerekli" });
+  }
+
+  const offerId = Number(request.params.id);
+  if (!Number.isFinite(offerId) || offerId <= 0) {
+    return reply.code(400).send({ error: "Gecersiz kayit id" });
+  }
+
+  const updateRes = await matchPool.query<{ id: string }>(
+    `UPDATE matched_offers
+     SET status = 'saved',
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING id::text`,
+    [offerId]
+  );
+
+  if ((updateRes.rowCount ?? 0) === 0) {
+    return reply.code(404).send({ error: "Kayit bulunamadi" });
+  }
+
+  return { ok: true };
+});
+
 app.post<{ Body: SaveMatchedOfferBody }>("/matched-offers/save", async (request, reply) => {
   const authUser = await resolveRequestUser(request);
   if (!authUser) {
@@ -1679,6 +1867,41 @@ app.post<{ Body: SaveMatchedOfferBody }>("/matched-offers/save", async (request,
       return reply.code(409).send({ error: message });
     }
     throw error;
+  }
+});
+
+app.get<{ Params: { id: string }; Querystring: { limit?: string } }>("/matched-offers/:id/erp-payload-preview", async (request, reply) => {
+  const authUser = await resolveRequestUser(request);
+  if (!authUser) {
+    return reply.code(401).send({ error: "Unauthorized" });
+  }
+
+  const offerId = Number(request.params.id);
+  if (!Number.isFinite(offerId) || offerId <= 0) {
+    return reply.code(400).send({ error: "Gecersiz kayit id" });
+  }
+
+  try {
+    const body = await loadSavedMatchedOfferForErp(offerId, authUser);
+    if (!body) {
+      return reply.code(404).send({ error: "Kayit bulunamadi" });
+    }
+
+    const limit = normalizePositiveInteger(request.query.limit);
+    const previewBody = limit ? { ...body, rows: body.rows.slice(0, limit) } : body;
+    const payload = await buildInsertOfferPayload(previewBody);
+    return {
+      ok: true,
+      offerId,
+      rowCount: previewBody.rows.length,
+      payload
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("erisim yetkiniz")) {
+      return reply.code(403).send({ error: message });
+    }
+    return reply.code(500).send({ error: message });
   }
 });
 

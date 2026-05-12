@@ -450,6 +450,56 @@ button {
   text-transform: uppercase;
 }
 
+.table-toolbar,
+.table-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.table-toolbar {
+  border-bottom: 1px solid #e6edf5;
+}
+
+.table-toolbar-status,
+.table-pagination span {
+  color: var(--portal-muted);
+  font-size: 0.84rem;
+}
+
+.table-page-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--portal-muted);
+  font-size: 0.84rem;
+}
+
+.table-page-size select {
+  width: 80px;
+  padding: 7px 9px;
+  border-radius: 8px;
+}
+
+.table-filter-row th {
+  padding-top: 0;
+  background: #fbfdff;
+}
+
+.table-filter-row input {
+  min-width: 64px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  text-transform: none;
+}
+
+.table-pagination {
+  justify-content: flex-end;
+}
+
 .portal-table-clickable tbody tr {
   cursor: pointer;
 }

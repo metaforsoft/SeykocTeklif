@@ -229,6 +229,152 @@ function findColumnIndex(headers: string[], patterns: RegExp[]): number {
   return headers.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
 }
 
+function splitPlainTextTableLine(line: string): string[] {
+  if (line.includes("\t")) {
+    return line.split("\t").map((cell) => cell.trim());
+  }
+  if (line.includes(";")) {
+    return line.split(";").map((cell) => cell.trim());
+  }
+  return line.split(/\s{2,}/).map((cell) => cell.trim());
+}
+
+function parseLoosePlainTextTableLine(line: string): string[] | null {
+  const match = line.trim().match(/^(.+?)\s+([1-9]\d{3}(?:[-\s][^\s]+)?)\s+(\d+(?:[\.,]\d+)?\s*[xX*×]\s*\d+(?:[\.,]\d+)?(?:\s*[xX*×]\s*\d+(?:[\.,]\d+)?)?)\s+(\d+(?:[\.,]\d+)?)\s+(\d+(?:[\.,]\d+)?)\s+(.+)$/);
+  return match ? match.slice(1).map((cell) => cell.trim()) : null;
+}
+
+function parsePlainTextTableDocument(rawText: string): ParsedOrderDocument | null {
+  const lines = rawText
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return null;
+
+  const headerIndex = lines.findIndex((line) => {
+    const normalized = normalizeHeaderName(line);
+    return normalized.includes("malzeme")
+      && (normalized.includes("olcu") || normalized.includes("ebat") || normalized.includes("dimension"))
+      && (normalized.includes("adet") || normalized.includes("miktar"));
+  });
+  if (headerIndex < 0) return null;
+
+  const headers = splitPlainTextTableLine(lines[headerIndex]).map(normalizeHeaderName);
+  const rows = lines.slice(headerIndex + 1).map((line) => splitPlainTextTableLine(line));
+  const hasDelimitedRows = rows.some((row) => row.length >= Math.min(headers.length, 4));
+  const effectiveRows = hasDelimitedRows
+    ? rows
+    : lines.slice(headerIndex + 1).map((line) => parseLoosePlainTextTableLine(line)).filter((row): row is string[] => Boolean(row));
+  const effectiveHeaders = hasDelimitedRows
+    ? headers
+    : ["musteri parca no", "malzeme cinsi", "malzeme olculeri", "adet", "fiyat", "musteri no"];
+
+  if (effectiveRows.length === 0) return null;
+
+  const customerPartNoIndex = findColumnIndex(effectiveHeaders, [/\bmusteri\s+parca\b/, /\bcustomer\s+part\b/, /\bpart\s+no\b/]);
+  const materialIndex = findColumnIndex(effectiveHeaders, [/\bmalzeme\s+cinsi\b/, /\bmalzeme\b/, /\bmaterial\b/, /\balasim\b/]);
+  const dimensionIndex = findColumnIndex(effectiveHeaders, [/\bmalzeme\s+olcu/, /\bolcu/, /\bebat\b/, /\bdimension\b/, /\bsize\b/]);
+  const qtyIndex = findColumnIndex(effectiveHeaders, [/\badet\b/, /\bmiktar\b/, /\bqty\b/, /\bquantity\b/]);
+  const unitPriceIndex = findColumnIndex(effectiveHeaders, [/\bfiyat\b/, /\bbirim\s+fiyat\b/, /\bprice\b/]);
+  const customerNoIndex = findColumnIndex(effectiveHeaders, [/\bmusteri\s+no\b/, /\bcustomer\s+no\b/, /\bcari\s+no\b/]);
+
+  if (dimensionIndex < 0 || qtyIndex < 0) return null;
+
+  const items: ParsedOrderLine[] = [];
+  for (const row of effectiveRows) {
+    const dims = parseDimensionText(row[dimensionIndex]);
+    if (dims.length < 2) continue;
+
+    const sortedDims = [...dims].sort((a, b) => a - b);
+    const material = materialIndex >= 0 ? toCellText(row[materialIndex]) : null;
+    const series = extractSeries(material);
+    const qty = toCellNumber(row[qtyIndex]);
+    const customerPartNo = customerPartNoIndex >= 0 ? toCellText(row[customerPartNoIndex]) : null;
+    const customerNo = customerNoIndex >= 0 ? toCellText(row[customerNoIndex]) : null;
+    const headerContext = [customerPartNo, material, customerNo].filter(Boolean).join(" | ") || null;
+    const raw = [
+      qty ? `${qty} ADET` : "",
+      `OLCU ${dims.join("x")}`,
+      material ?? "",
+      customerPartNo ?? ""
+    ].filter(Boolean).join(" ");
+
+    items.push({
+      raw,
+      query: [headerContext, sortedDims.join("x"), series ? `seri ${series}` : ""].filter(Boolean).join(" ").trim(),
+      normalized_line: raw,
+      dim_text: sortedDims.join("x"),
+      dim1: sortedDims[0] ?? null,
+      dim2: sortedDims[1] ?? null,
+      dim3: sortedDims[2] ?? null,
+      qty,
+      series,
+      alasim: series,
+      temper: null,
+      birimFiyat: unitPriceIndex >= 0 ? toCellNumber(row[unitPriceIndex]) : null,
+      musteriNo: customerNo,
+      musteriParcaNo: customerPartNo,
+      header_context: headerContext,
+      confidence: qty !== null ? 0.97 : 0.9
+    });
+  }
+
+  if (items.length === 0) return null;
+
+  return {
+    source_type: "plain_text",
+    extracted_text: rawText,
+    header_context: null,
+    items,
+    parser_confidence: Number((items.reduce((sum, item) => sum + item.confidence, 0) / items.length).toFixed(3)),
+    extraction_method: "plain_text_table"
+  };
+}
+
+function plainTextNeedsLlmCompletion(rawText: string, doc: ParsedOrderDocument): boolean {
+  if (doc.items.length === 0) return true;
+  if (doc.extraction_method !== "plain_text_table") return true;
+  const normalized = normalizeHeaderName(rawText);
+  const mentionsPrice = /\b(fiyat|b\s*fiyat|bfiyat|birim\s+fiyat|price|unit\s+price|tanesi|birimi|tl|try|usd|eur)\b/.test(normalized);
+  if (mentionsPrice && doc.items.some((item) => item.birimFiyat == null)) return true;
+
+  const mentionsCustomer = /\b(musteri|customer|cari|parca\s+no|part\s+no)\b/.test(normalized);
+  if (mentionsCustomer && doc.items.some((item) => !item.musteriNo && !item.musteriParcaNo)) return true;
+
+  return false;
+}
+
+function mergeLlmCompletion(base: ParsedOrderDocument, completion: ParsedOrderDocument): ParsedOrderDocument {
+  if (base.items.length !== completion.items.length) {
+    return completion;
+  }
+
+  return {
+    ...base,
+    extraction_method: `${base.extraction_method || "plain_text"}+llm_completion`,
+    items: base.items.map((item, index) => {
+      const enriched = completion.items[index];
+      return {
+        ...item,
+        qty: item.qty ?? enriched.qty ?? null,
+        series: item.series ?? enriched.series ?? null,
+        alasim: item.alasim ?? enriched.alasim ?? enriched.series ?? null,
+        temper: item.temper ?? enriched.temper ?? null,
+        kg: item.kg ?? enriched.kg ?? null,
+        birimFiyat: item.birimFiyat ?? enriched.birimFiyat ?? null,
+        talasMik: item.talasMik ?? enriched.talasMik ?? null,
+        musteriNo: item.musteriNo ?? enriched.musteriNo ?? null,
+        musteriParcaNo: item.musteriParcaNo ?? enriched.musteriParcaNo ?? null,
+        kesimDurumu: item.kesimDurumu ?? enriched.kesimDurumu ?? null,
+        mensei: item.mensei ?? enriched.mensei ?? null,
+        header_context: item.header_context ?? enriched.header_context ?? null,
+        query: [item.query, enriched.query].filter(Boolean).join(" ").trim()
+      };
+    })
+  };
+}
+
 function buildInstructionPatterns(instruction: string | null | undefined, bucket: "qty" | "x" | "y" | "z" | "material" | "part" | "desc"): RegExp[] {
   const normalized = normalizeHeaderName(instruction ?? "");
   if (!normalized) return [];
@@ -828,10 +974,22 @@ export async function extractSourceDocument(input: {
       ?? matchedInstructionPolicy?.policy_json?.extractionPrompt
       ?? matchedProfile?.instruction_text
       ?? null;
-    let parsed = annotateMethod(parseOrderDocument(normalizedText, "plain_text"), "plain_text");
-    if (effectiveInstruction && parsed.items.length === 0) {
+    let parsed = parsePlainTextTableDocument(input.rawText) ?? annotateMethod(parseOrderDocument(normalizedText, "plain_text"), "plain_text");
+    const shouldTryLlm = input.forceAiFallback === true
+      || parsed.items.length === 0
+      || Boolean(effectiveInstruction)
+      || plainTextNeedsLlmCompletion(normalizedText, parsed);
+    let fallbackAttempted = false;
+    let fallbackSucceeded = false;
+    if (shouldTryLlm) {
+      fallbackAttempted = true;
       const llm = await extractWithLlmFallback(normalizedText, "plain_text", effectiveInstruction);
-      if (llm.doc) parsed = llm.doc;
+      if (llm.doc) {
+        parsed = parsed.items.length > 0 && input.forceAiFallback !== true
+          ? mergeLlmCompletion(parsed, llm.doc)
+          : llm.doc;
+        fallbackSucceeded = true;
+      }
     }
     return {
       ...parsed,
@@ -844,8 +1002,8 @@ export async function extractSourceDocument(input: {
       }),
       debug: {
         ...buildDebugMeta(input),
-        fallback_attempted: false,
-        fallback_succeeded: false,
+        fallback_attempted: fallbackAttempted,
+        fallback_succeeded: fallbackSucceeded,
         raw_text_preview: buildPreview(parsed.extracted_text),
         item_count: parsed.items.length
       }

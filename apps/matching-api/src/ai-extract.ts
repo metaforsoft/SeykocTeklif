@@ -73,11 +73,16 @@ export async function extractWithGoogleVision(buffer: Buffer): Promise<TextExtra
 
 function buildPrompt(ocrText: string, instruction?: string | null): string {
   return [
-    "Siparis notundan olcu, adet ve seri alanlarini cikar.",
+    "Siparis notundan tum teklif satiri alanlarini cikar.",
     "Sadece gercek siparis satirlarini dondur.",
-    "Olculeri x ile normalize et.",
+    "Olculeri x ile normalize et. Olcu yoksa dimensions null degil bos string olabilir.",
     "Adet yoksa null dondur.",
     "Seri yoksa null dondur.",
+    "Alasim/malzeme cinsi 5083, 6082 gibi seri veya 5083-TIRTIKLI gibi metin olabilir.",
+    "Birim fiyat dogal dille fiyat, b.fiyat, bfiyat, tanesi, birimi, unit price gibi yazilabilir; yoksa null dondur.",
+    "Musteri parca no; parca adi, parca no, referans, musteri parca gibi yazilabilir.",
+    "Musteri no; cari no, musteri kodu, customer no gibi yazilabilir.",
+    "Kesim ve mensei bilgisi varsa dondur, yoksa null.",
     instruction ? `Kullanici talimati: ${instruction}` : "",
     "Ham OCR metni:",
     ocrText
@@ -125,9 +130,18 @@ export async function extractWithLlmFallback(ocrText: string, sourceType: Parsed
                       raw: { type: "string" },
                       dimensions: { type: "string" },
                       qty: { type: ["number", "null"] },
-                      series: { type: ["string", "null"] }
+                      series: { type: ["string", "null"] },
+                      alasim: { type: ["string", "null"] },
+                      temper: { type: ["string", "null"] },
+                      kg: { type: ["number", "null"] },
+                      birimFiyat: { type: ["number", "null"] },
+                      talasMik: { type: ["number", "null"] },
+                      musteriNo: { type: ["string", "null"] },
+                      musteriParcaNo: { type: ["string", "null"] },
+                      kesimDurumu: { type: ["string", "null"] },
+                      mensei: { type: ["string", "null"] }
                     },
-                    required: ["raw", "dimensions", "qty", "series"]
+                    required: ["raw", "dimensions", "qty", "series", "alasim", "temper", "kg", "birimFiyat", "talasMik", "musteriNo", "musteriParcaNo", "kesimDurumu", "mensei"]
                   }
                 }
               },
@@ -147,7 +161,21 @@ export async function extractWithLlmFallback(ocrText: string, sourceType: Parsed
     if (!content) return { doc: null, error: "llm_text_empty_content" };
     const parsed = JSON.parse(content) as {
       header_context: string | null;
-      items: Array<{ raw: string; dimensions: string; qty: number | null; series: string | null }>;
+      items: Array<{
+        raw: string;
+        dimensions: string;
+        qty: number | null;
+        series: string | null;
+        alasim?: string | null;
+        temper?: string | null;
+        kg?: number | null;
+        birimFiyat?: number | null;
+        talasMik?: number | null;
+        musteriNo?: string | null;
+        musteriParcaNo?: string | null;
+        kesimDurumu?: string | null;
+        mensei?: string | null;
+      }>;
     };
 
     const lines = parsed.items
@@ -165,6 +193,15 @@ export async function extractWithLlmFallback(ocrText: string, sourceType: Parsed
           dim3: sorted[2] ?? null,
           qty: item.qty,
           series: item.series,
+          alasim: item.alasim ?? item.series ?? null,
+          temper: item.temper ?? null,
+          kg: item.kg ?? null,
+          birimFiyat: item.birimFiyat ?? null,
+          talasMik: item.talasMik ?? null,
+          musteriNo: item.musteriNo ?? null,
+          musteriParcaNo: item.musteriParcaNo ?? null,
+          kesimDurumu: item.kesimDurumu ?? null,
+          mensei: item.mensei ?? null,
           header_context: parsed.header_context,
           confidence: 0.92
         };
@@ -246,9 +283,18 @@ export async function extractWithLlmImageFallback(
                       raw: { type: "string" },
                       dimensions: { type: "string" },
                       qty: { type: ["number", "null"] },
-                      series: { type: ["string", "null"] }
+                      series: { type: ["string", "null"] },
+                      alasim: { type: ["string", "null"] },
+                      temper: { type: ["string", "null"] },
+                      kg: { type: ["number", "null"] },
+                      birimFiyat: { type: ["number", "null"] },
+                      talasMik: { type: ["number", "null"] },
+                      musteriNo: { type: ["string", "null"] },
+                      musteriParcaNo: { type: ["string", "null"] },
+                      kesimDurumu: { type: ["string", "null"] },
+                      mensei: { type: ["string", "null"] }
                     },
-                    required: ["raw", "dimensions", "qty", "series"]
+                    required: ["raw", "dimensions", "qty", "series", "alasim", "temper", "kg", "birimFiyat", "talasMik", "musteriNo", "musteriParcaNo", "kesimDurumu", "mensei"]
                   }
                 }
               },
@@ -268,7 +314,21 @@ export async function extractWithLlmImageFallback(
     if (!content) return { doc: null, error: "llm_image_empty_content" };
     const parsed = JSON.parse(content) as {
       header_context: string | null;
-      items: Array<{ raw: string; dimensions: string; qty: number | null; series: string | null }>;
+      items: Array<{
+        raw: string;
+        dimensions: string;
+        qty: number | null;
+        series: string | null;
+        alasim?: string | null;
+        temper?: string | null;
+        kg?: number | null;
+        birimFiyat?: number | null;
+        talasMik?: number | null;
+        musteriNo?: string | null;
+        musteriParcaNo?: string | null;
+        kesimDurumu?: string | null;
+        mensei?: string | null;
+      }>;
     };
 
     const lines = parsed.items
@@ -286,6 +346,15 @@ export async function extractWithLlmImageFallback(
           dim3: sorted[2] ?? null,
           qty: item.qty,
           series: item.series,
+          alasim: item.alasim ?? item.series ?? null,
+          temper: item.temper ?? null,
+          kg: item.kg ?? null,
+          birimFiyat: item.birimFiyat ?? null,
+          talasMik: item.talasMik ?? null,
+          musteriNo: item.musteriNo ?? null,
+          musteriParcaNo: item.musteriParcaNo ?? null,
+          kesimDurumu: item.kesimDurumu ?? null,
+          mensei: item.mensei ?? null,
           header_context: parsed.header_context,
           confidence: 0.95
         };
